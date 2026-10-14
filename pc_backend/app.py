@@ -23,9 +23,17 @@ def auth(fn):
         return fn(*a, **kw)
     return wrapped
 
+@app.after_request
+def add_cors_headers(resp):
+    resp.headers["Access-Control-Allow-Origin"] = os.getenv("DASHBOARD_ORIGIN", "*")
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Rover-Token, Authorization"
+    resp.headers["Access-Control-Allow-Private-Network"] = "true"
+    return resp
+
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="nex-rover-pc-backend")
+    return jsonify(ok=True, service="nex-rover-pc-backend", esp32_configured=bool(ESP32_URL))
 
 @app.post("/api/analyze")
 @auth
@@ -79,12 +87,20 @@ def command():
     else:
         return jsonify(ok=False,error="command not allowed"),400
     try:
-        r=requests.get(ESP32_URL+endpoint,params=params,timeout=2.5)
+        # Try POST with JSON first (standard contract), fallback to GET with query params
+        try:
+            r = requests.post(ESP32_URL + endpoint, json=params, timeout=2.5)
+            if not r.ok:
+                r = requests.get(ESP32_URL + endpoint, params=params, timeout=2.5)
+        except requests.RequestException:
+            r = requests.get(ESP32_URL + endpoint, params=params, timeout=2.5)
+        
         r.raise_for_status()
-        return jsonify(ok=True,esp32_status=r.json())
+        resp_json = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text}
+        return jsonify(ok=True, esp32_status=resp_json)
     except Exception:
         app.logger.exception("ESP32 request failed")
-        return jsonify(ok=False,error="ESP32 unreachable; check hotspot and IP"),502
+        return jsonify(ok=False, error=f"ESP32 unreachable at {ESP32_URL}; check hotspot and IP"), 502
 
 @app.get("/api/status")
 @auth

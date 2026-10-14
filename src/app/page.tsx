@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header } from '@/components/Header';
 import { CameraPanel } from '@/components/CameraPanel';
+import { VisionAnalysisCard } from '@/components/VisionAnalysisCard';
 import { DrivePad } from '@/components/DrivePad';
 import { MotorSpeedControl } from '@/components/MotorSpeedControl';
 import { ArmController } from '@/components/ArmController';
@@ -21,6 +22,7 @@ import {
   ChatMessage,
   ValidatedRobotAction,
   DEFAULT_ARM_ANGLES,
+  CapturedFrame,
 } from '@/types/robot';
 import { RobotApiClient } from '@/lib/robot-api';
 import { parseWithCloudLLM } from '@/lib/ai-command-parser';
@@ -31,6 +33,9 @@ export default function RoverDashboardPage() {
   const [settings, setSettings] = useState<RobotSettings>({
     robotIp: 'http://192.168.4.1',
     cameraStreamUrl: 'http://192.168.4.1:81/stream',
+    pcBackendUrl: 'http://127.0.0.1:5000',
+    roverToken: '',
+    usePcRelay: true,
     isSimulated: true,
     holdToDrive: true,
     pollIntervalMs: 1000,
@@ -39,6 +44,7 @@ export default function RoverDashboardPage() {
   });
 
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null);
 
   // Live Telemetry
   const [telemetry, setTelemetry] = useState<TelemetryData>({
@@ -59,7 +65,7 @@ export default function RoverDashboardPage() {
     {
       id: 'welcome-1',
       sender: 'rover',
-      text: 'NEX-ROVER systems initialized. Ready for telemetry stream or voice / manual commands.',
+      text: 'NEX-ROVER systems initialized. Ready for Gemini Vision mobile frame analysis or manual/voice commands.',
       timestamp: 'INIT',
     },
   ]);
@@ -156,7 +162,7 @@ export default function RoverDashboardPage() {
     speakConfirmation(`Executing ${preset.label}`);
   }, [speakConfirmation]);
 
-  // Emergency STOP
+  // Emergency STOP (Interrupts all movements immediately)
   const handleEmergencyStop = useCallback(async () => {
     if (autoStopTimeoutRef.current) {
       clearTimeout(autoStopTimeoutRef.current);
@@ -172,7 +178,7 @@ export default function RoverDashboardPage() {
     const alertMessage: ChatMessage = {
       id: `estop-${Date.now()}`,
       sender: 'rover',
-      text: 'EMERGENCY STOP ENGAGED. All DC motors halted.',
+      text: 'EMERGENCY STOP ENGAGED. All DC motors halted immediately.',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       action: { type: 'ESTOP' },
       status: 'executed',
@@ -274,6 +280,21 @@ export default function RoverDashboardPage() {
     }
   }, [executeValidatedAction, speakConfirmation]);
 
+  // Callback when an approved vision action is executed via relay
+  const handleVisionExecutionFinished = useCallback((cmd: string) => {
+    setTelemetry((prev) => ({ ...prev, lastCommand: cmd }));
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `vision-exec-${Date.now()}`,
+        sender: 'rover',
+        text: `Gemini Vision Action approved & executed on hardware: [${cmd}]`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        status: 'executed',
+      },
+    ]);
+  }, []);
+
   // Test Ping from settings
   const handleTestConnection = async (ip: string) => {
     const start = performance.now();
@@ -314,21 +335,32 @@ export default function RoverDashboardPage() {
 
       {/* Main Responsive Grid Layout */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 space-y-4 sm:space-y-6">
-        {/* Top Section: Live Camera + Telemetry + Voice */}
+        {/* Top Section: Live Camera + Vision Card + Telemetry + Controls */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-          {/* Large Live Camera Panel (Span 7 on Desktop) */}
+          {/* Left Column: Camera Viewport + Gemini Vision Approval Card + Telemetry (Span 7) */}
           <div className="lg:col-span-7 flex flex-col gap-4">
             <CameraPanel
               settings={settings}
               obstacleDistance={telemetry.obstacleDistanceCm}
               currentSpeed={telemetry.currentSpeed}
+              capturedFrame={capturedFrame}
+              onFrameCaptured={(frame) => setCapturedFrame(frame)}
+            />
+
+            {/* Mobile-Camera Gemini AI & Operator Approval Card */}
+            <VisionAnalysisCard
+              capturedFrame={capturedFrame}
+              onClearFrame={() => setCapturedFrame(null)}
+              settings={settings}
+              onEmergencyStop={handleEmergencyStop}
+              onExecutionFinished={handleVisionExecutionFinished}
             />
 
             {/* Ultrasonic Sonar & Battery Telemetry Card */}
             <TelemetryCard telemetry={telemetry} />
           </div>
 
-          {/* Controls & Interaction Panel (Span 5 on Desktop) */}
+          {/* Right Column: Controls & Interaction Panel (Span 5) */}
           <div className="lg:col-span-5 flex flex-col gap-4">
             {/* Drive Controller (D-Pad) */}
             <DrivePad

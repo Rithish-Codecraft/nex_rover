@@ -26,6 +26,9 @@ export interface TelemetryData {
 export interface RobotSettings {
   robotIp: string;              // e.g. "http://192.168.4.1"
   cameraStreamUrl: string;      // e.g. "http://192.168.4.1:81/stream"
+  pcBackendUrl: string;         // e.g. "http://127.0.0.1:5000" or local PC LAN IP
+  roverToken: string;           // token for X-Rover-Token auth
+  usePcRelay: boolean;          // true = route commands via PC backend relay (recommended for HTTPS)
   isSimulated: boolean;         // true = simulation mode, false = physical hardware
   holdToDrive: boolean;         // true = stop when released, false = click to toggle
   pollIntervalMs: number;       // status polling interval (e.g. 1000ms)
@@ -97,3 +100,65 @@ export const ARM_PRESETS: ArmPosePreset[] = [
     angles: { BASE: 45, SHOULDER: 60, ELBOW: 120, GRIPPER: 80 },
   },
 ];
+
+// --- Gemini AI Vision Types ---
+
+export type GeminiVisionAction =
+  | 'STOP'
+  | 'FORWARD'
+  | 'BACKWARD'
+  | 'LEFT'
+  | 'RIGHT'
+  | 'ARM_ACTION'
+  | 'NO_ACTION';
+
+export interface GeminiArmAction {
+  joint: ArmJoint;
+  angle: number; // 0 to 180
+}
+
+export interface GeminiVisionRecommendation {
+  sceneSummary: string;
+  detectedObjects: string[];
+  hazards: string[];
+  recommendedAction: GeminiVisionAction;
+  armAction?: GeminiArmAction;
+  speed: number;        // integer from 0 to 255 (conservative default 120-150)
+  durationMs: number;   // integer from 0 to 1000 (enforced <= 1000ms)
+  confidence: number;   // number from 0 to 1
+  requiresApproval: boolean; // must be true
+  reason: string;
+}
+
+export interface VisionAnalysisResult {
+  ok: boolean;
+  recommendation?: GeminiVisionRecommendation;
+  error?: string;
+  source?: 'gemini-vision' | 'simulation-vision';
+  modelUsed?: string;
+  rawResponse?: string;
+}
+
+export interface CapturedFrame {
+  dataUrl: string; // base64 data URL (e.g. data:image/jpeg;base64,...)
+  width: number;
+  height: number;
+  timestamp: string;
+}
+
+export type ApprovalState =
+  | 'idle'
+  | 'analyzing'
+  | 'recommendation_ready'
+  | 'approving'
+  | 'executed'
+  | 'rejected'
+  | 'failed';
+
+export interface RelayCommandResult {
+  ok: boolean;
+  commandSent?: string;
+  esp32Status?: Record<string, unknown>;
+  error?: string;
+  acknowledgedBy?: 'pc-backend' | 'esp32-direct' | 'simulation';
+}

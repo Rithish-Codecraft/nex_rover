@@ -7,24 +7,29 @@ import {
   Smartphone,
   Wifi,
   RefreshCw,
-  Maximize2,
   AlertTriangle,
   Camera,
   Layers,
   ShieldAlert,
+  Sparkles,
+  Check,
 } from 'lucide-react';
-import { RobotSettings } from '@/types/robot';
+import { RobotSettings, CapturedFrame } from '@/types/robot';
 
 interface CameraPanelProps {
   settings: RobotSettings;
   obstacleDistance: number | null;
   currentSpeed: number;
+  capturedFrame?: CapturedFrame | null;
+  onFrameCaptured?: (frame: CapturedFrame) => void;
 }
 
 export const CameraPanel: React.FC<CameraPanelProps> = ({
   settings,
   obstacleDistance,
   currentSpeed,
+  capturedFrame,
+  onFrameCaptured,
 }) => {
   const [activeSource, setActiveSource] = useState<'esp32' | 'phone'>('esp32');
   const [phoneStreamActive, setPhoneStreamActive] = useState<boolean>(false);
@@ -32,8 +37,10 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
   const [espStreamKey, setEspStreamKey] = useState<number>(0);
   const [espImgError, setEspImgError] = useState<boolean>(false);
   const [hudVisible, setHudVisible] = useState<boolean>(true);
+  const [shutterFlash, setShutterFlash] = useState<boolean>(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
   // Stop phone camera tracks cleanly
@@ -110,8 +117,44 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
     setEspStreamKey(Date.now());
   };
 
+  // Capture frame from the active rear camera video element into canvas
+  const handleCaptureFrame = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+    // Shutter flash effect
+    setShutterFlash(true);
+    setTimeout(() => setShutterFlash(false), 200);
+
+    const frame: CapturedFrame = {
+      dataUrl,
+      width,
+      height,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    };
+
+    if (onFrameCaptured) {
+      onFrameCaptured(frame);
+    }
+  };
+
   return (
     <div className="relative flex flex-col w-full rounded-xl bg-slate-950/90 border border-cyan-500/30 overflow-hidden shadow-2xl">
+      {/* Hidden offscreen canvas for frame capture */}
+      <canvas ref={canvasRef} className="hidden" />
+
       {/* Viewport Top Header & Controls */}
       <div className="flex items-center justify-between px-3 py-2 bg-slate-900/90 border-b border-slate-800 text-xs">
         {/* Source Switcher Tabs */}
@@ -178,11 +221,11 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
             >
               {phoneStreamActive ? (
                 <>
-                  <VideoOff className="w-3 h-3" /> Stop
+                  <VideoOff className="w-3 h-3" /> Stop Cam
                 </>
               ) : (
                 <>
-                  <Camera className="w-3 h-3" /> Start
+                  <Camera className="w-3 h-3" /> Start Cam
                 </>
               )}
             </button>
@@ -192,6 +235,11 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
 
       {/* Main Video Viewport */}
       <div className="relative w-full aspect-video sm:aspect-[16/10] bg-slate-950 flex items-center justify-center overflow-hidden">
+        {/* Shutter Flash Animation */}
+        {shutterFlash && (
+          <div className="absolute inset-0 bg-white/70 z-30 pointer-events-none transition-opacity duration-150" />
+        )}
+
         {/* Source 1: ESP32-CAM */}
         {activeSource === 'esp32' && (
           <div className="relative w-full h-full flex items-center justify-center bg-black">
@@ -217,7 +265,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
                 </h4>
                 <p className="text-xs text-slate-400 mt-1 font-mono">
                   {settings.isSimulated
-                    ? 'Hardware stream disabled in simulation. Switch to "Phone Cam" tab to test with smartphone camera!'
+                    ? 'Switch to "Phone Cam" tab to capture frames with your phone camera for Gemini Vision!'
                     : `Connecting to ${settings.cameraStreamUrl}. Verify ESP32-CAM power, Wi-Fi connection, and IP.`}
                 </p>
                 <div className="flex gap-2 mt-4">
@@ -259,10 +307,10 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
                   <Camera className="w-7 h-7" />
                 </div>
                 <h4 className="text-sm font-bold text-slate-200 font-mono tracking-wide">
-                  Smartphone Camera Preview
+                  Smartphone Camera Viewport
                 </h4>
                 <p className="text-xs text-slate-400 mt-1 font-mono">
-                  Mount the phone directly onto NEX-ROVER to use its high-definition rear camera.
+                  Provides high-resolution vision feed for Gemini AI navigation and obstacle inspection.
                 </p>
 
                 {phoneStreamError && (
@@ -332,6 +380,33 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
           </div>
         )}
       </div>
+
+      {/* Frame Capture Action Bar (Visible when Phone Camera is Active) */}
+      {activeSource === 'phone' && phoneStreamActive && (
+        <div className="px-3 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleCaptureFrame}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-mono text-xs font-bold shadow-md shadow-cyan-950 active:scale-95 transition-all"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span>Capture Frame for Gemini AI</span>
+            </button>
+
+            {capturedFrame && (
+              <span className="flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
+                <Check className="w-3 h-3" />
+                Frame Snapshot Ready
+              </span>
+            )}
+          </div>
+
+          <div className="text-[10px] font-mono text-slate-500 hidden sm:block">
+            Rear 720p HD Feed
+          </div>
+        </div>
+      )}
     </div>
   );
 };

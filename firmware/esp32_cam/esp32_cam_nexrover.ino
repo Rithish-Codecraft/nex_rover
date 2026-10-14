@@ -66,35 +66,33 @@ void handleOptions() {
   server.send(204);
 }
 
-// Handler: POST /api/drive
+// Handler: /api/drive (Supports both POST JSON and GET params)
 void handleDrive() {
   setCorsHeaders();
-  if (server.method() != HTTP_POST) {
-    server.send(405, "application/json", "{\"error\":\"Method not allowed\"}");
-    return;
+  String cmd = "";
+
+  if (server.hasArg("command")) {
+    cmd = server.arg("command");
+  } else if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    StaticJsonDocument<200> doc;
+    DeserializationError err = deserializeJson(doc, body);
+    if (!err && doc.containsKey("command")) {
+      cmd = String((const char*)doc["command"]);
+    }
   }
 
-  String body = server.arg("plain");
-  StaticJsonDocument<200> doc;
-  DeserializationError err = deserializeJson(doc, body);
-
-  if (err) {
-    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-    return;
-  }
-
-  const char* cmd = doc["command"];
-  if (!cmd) {
+  if (cmd.length() == 0) {
     server.send(400, "application/json", "{\"error\":\"Missing command\"}");
     return;
   }
 
   // Forward to Arduino UNO via Serial (GPIO 1 TX)
   Serial.println(cmd);
-  lastCommand = String(cmd);
+  lastCommand = cmd;
 
-  if (strncmp(cmd, "V:", 2) == 0) {
-    currentSpeed = atoi(cmd + 2);
+  if (cmd.startsWith("V:")) {
+    currentSpeed = cmd.substring(2).toInt();
   }
 
   StaticJsonDocument<200> resp;
@@ -105,33 +103,33 @@ void handleDrive() {
   server.send(200, "application/json", output);
 }
 
-// Handler: POST /api/arm
+// Handler: /api/arm (Supports both POST JSON and GET params)
 void handleArm() {
   setCorsHeaders();
-  if (server.method() != HTTP_POST) {
-    server.send(405, "application/json", "{\"error\":\"Method not allowed\"}");
-    return;
+  String joint = "";
+  int angle = -1;
+
+  if (server.hasArg("joint") && server.hasArg("angle")) {
+    joint = server.arg("joint");
+    angle = server.arg("angle").toInt();
+  } else if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    StaticJsonDocument<200> doc;
+    DeserializationError err = deserializeJson(doc, body);
+    if (!err) {
+      if (doc.containsKey("joint")) joint = String((const char*)doc["joint"]);
+      if (doc.containsKey("angle")) angle = doc["angle"];
+    }
   }
 
-  String body = server.arg("plain");
-  StaticJsonDocument<200> doc;
-  DeserializationError err = deserializeJson(doc, body);
-
-  if (err) {
-    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-    return;
-  }
-
-  const char* joint = doc["joint"];
-  int angle = doc["angle"] | -1;
-
-  if (!joint || angle < 0 || angle > 180) {
+  joint.toUpperCase();
+  if (joint.length() == 0 || angle < 0 || angle > 180) {
     server.send(400, "application/json", "{\"error\":\"Invalid joint or angle (0-180)\"}");
     return;
   }
 
   // Format: ARM:JOINT:ANGLE
-  String armCmd = "ARM:" + String(joint) + ":" + String(angle);
+  String armCmd = "ARM:" + joint + ":" + String(angle);
   Serial.println(armCmd);
   lastCommand = armCmd;
 
@@ -250,11 +248,13 @@ void setup() {
   Serial.println(WiFi.localIP());
 #endif
 
-  // Register Routes
+  // Register Routes (Supports both POST JSON and GET query parameters)
   server.on("/api/drive", HTTP_OPTIONS, handleOptions);
   server.on("/api/drive", HTTP_POST, handleDrive);
+  server.on("/api/drive", HTTP_GET, handleDrive);
   server.on("/api/arm", HTTP_OPTIONS, handleOptions);
   server.on("/api/arm", HTTP_POST, handleArm);
+  server.on("/api/arm", HTTP_GET, handleArm);
   server.on("/api/status", HTTP_OPTIONS, handleOptions);
   server.on("/api/status", HTTP_GET, handleStatus);
   server.on("/stream", HTTP_GET, handleStream);

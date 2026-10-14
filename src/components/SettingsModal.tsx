@@ -11,6 +11,8 @@ import {
   CheckCircle,
   AlertTriangle,
   RotateCcw,
+  Server,
+  Key,
 } from 'lucide-react';
 import { RobotSettings } from '@/types/robot';
 
@@ -34,6 +36,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     status: 'idle' | 'testing' | 'success' | 'failed';
     message?: string;
   }>({ status: 'idle' });
+  const [pcTestResult, setPcTestResult] = useState<{
+    status: 'idle' | 'testing' | 'success' | 'failed';
+    message?: string;
+  }>({ status: 'idle' });
 
   if (!isOpen) return null;
 
@@ -53,6 +59,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  const handleTestPcBackend = async () => {
+    setPcTestResult({ status: 'testing' });
+    try {
+      const url = `${formData.pcBackendUrl.replace(/\/+$/, '')}/health`;
+      const res = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (res.ok) {
+        const data = await res.json();
+        setPcTestResult({
+          status: 'success',
+          message: `PC Backend online! Service: ${data.service}`,
+        });
+      } else {
+        setPcTestResult({
+          status: 'failed',
+          message: `HTTP ${res.status}: Check app.py`,
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unreachable';
+      setPcTestResult({
+        status: 'failed',
+        message: `Could not reach ${formData.pcBackendUrl}: ${msg}`,
+      });
+    }
+  };
+
   const handleSave = () => {
     onSaveSettings(formData);
     onClose();
@@ -64,6 +96,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         ...prev,
         robotIp: 'http://192.168.4.1',
         cameraStreamUrl: 'http://192.168.4.1:81/stream',
+        usePcRelay: true,
         isSimulated: false,
       }));
     } else if (preset === 'sim') {
@@ -127,7 +160,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <div className="font-bold">📡 ESP32 AP Mode</div>
+                <div className="font-bold">📡 ESP32 AP + PC Relay</div>
                 <div className="text-[10px] text-slate-500 mt-0.5">
                   Default IP 192.168.4.1 (ESP32 Hotspot)
                 </div>
@@ -153,11 +186,83 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             />
           </div>
 
+          {/* PC Backend Relay Configuration */}
+          <div className="p-3 rounded-lg bg-slate-900/90 border border-cyan-500/30 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-slate-200 flex items-center gap-1.5">
+                <Server className="w-4 h-4 text-cyan-400" />
+                PC Backend Relay (Recommended for HTTPS)
+              </span>
+              <input
+                type="checkbox"
+                checked={formData.usePcRelay}
+                onChange={(e) =>
+                  setFormData((prev) => ({ ...prev, usePcRelay: e.target.checked }))
+                }
+                className="w-4 h-4 rounded bg-slate-950 accent-cyan-400 cursor-pointer"
+              />
+            </div>
+            <p className="text-[10px] text-slate-400">
+              When enabled, commands are relayed through your local PC backend to avoid HTTPS-to-HTTP mixed content blocks.
+            </p>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1">
+                PC Backend URL:
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={formData.pcBackendUrl || ''}
+                  onChange={(e) =>
+                    setFormData((prev) => ({ ...prev, pcBackendUrl: e.target.value }))
+                  }
+                  placeholder="http://127.0.0.1:5000"
+                  className="flex-1 bg-slate-950 border border-slate-800 focus:border-cyan-400 px-3 py-1.5 rounded-lg text-slate-100 font-mono text-xs focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleTestPcBackend}
+                  disabled={pcTestResult.status === 'testing'}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-bold text-xs"
+                >
+                  {pcTestResult.status === 'testing' ? 'Testing...' : 'Test PC'}
+                </button>
+              </div>
+              {pcTestResult.status === 'success' && (
+                <p className="flex items-center gap-1 text-[10px] text-emerald-400 mt-1">
+                  <CheckCircle className="w-3 h-3" /> {pcTestResult.message}
+                </p>
+              )}
+              {pcTestResult.status === 'failed' && (
+                <p className="flex items-center gap-1 text-[10px] text-rose-400 mt-1">
+                  <AlertTriangle className="w-3 h-3" /> {pcTestResult.message}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1 flex items-center gap-1">
+                <Key className="w-3 h-3 text-cyan-400" />
+                Rover Secret Token (X-Rover-Token):
+              </label>
+              <input
+                type="password"
+                value={formData.roverToken || ''}
+                onChange={(e) =>
+                  setFormData((prev) => ({ ...prev, roverToken: e.target.value }))
+                }
+                placeholder="Matches ROVER_TOKEN in pc_backend/.env"
+                className="w-full bg-slate-950 border border-slate-800 focus:border-cyan-400 px-3 py-1.5 rounded-lg text-slate-100 font-mono text-xs focus:outline-none"
+              />
+            </div>
+          </div>
+
           {/* ESP32-CAM Address */}
           <div>
             <label className="block text-slate-300 font-semibold mb-1 flex items-center gap-1.5">
               <Wifi className="w-4 h-4 text-cyan-400" />
-              ESP32-CAM HTTP Address
+              ESP32-CAM Direct Address
             </label>
             <div className="flex gap-2">
               <input

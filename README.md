@@ -1,230 +1,228 @@
 # NEX-ROVER — Mobile Robot Control Dashboard
 
 [![Vercel Deployment](https://img.shields.io/badge/Deployed_on-Vercel-black?style=for-the-badge&logo=vercel)](https://nex-rover-sigma.vercel.app)
-**Live Dashboard**: [https://nex-rover-sigma.vercel.app](https://nex-rover-sigma.vercel.app)
+**Live Production Dashboard**: [https://nex-rover-sigma.vercel.app](https://nex-rover-sigma.vercel.app)  
+**GitHub Repository**: [https://github.com/Rithish-Codecraft/nex_rover](https://github.com/Rithish-Codecraft/nex_rover)
 
-A dark, futuristic, mobile-first web dashboard for **NEX-ROVER**, a four-wheel-drive robotic rover featuring a 4-DOF robotic arm, ESP32-CAM video stream, phone camera preview, ultrasonic obstacle detection, and natural-language AI voice control.
+A dark, futuristic, mobile-first robotics dashboard and AI copilot for **NEX-ROVER**, a four-wheel-drive rover with a 4-DOF robotic arm, mobile rear-camera Gemini AI vision, authenticated PC backend command relay, and ESP32-CAM UART bridge to Arduino UNO & Nano.
 
 ---
 
-## Architecture Overview
+## 1. End-to-End System Architecture
 
 ```
-                      +---------------------------------------+
-                      |       Operator Smartphone / PC        |
-                      | Next.js Mobile-First Web Dashboard   |
-                      | - Phone Rear Cam / ESP32-CAM Viewport |
-                      | - 4-Way D-Pad + Speed Slider (0-255)  |
-                      | - 4-DOF Arm Kinematics & Poses        |
-                      | - Voice Commands (Speech Recognition) |
-                      | - AI Command Terminal (Safe Proxy)    |
-                      +---------------------------------------+
-                                          |
-                         HTTP / REST API (Wi-Fi 802.11)
-                                          |
-                                          v
-                      +---------------------------------------+
-                      |         ESP32-CAM Module              |
-                      | - IP: 192.168.4.1 (or Local DHCP)     |
-                      | - MJPEG Stream on /stream             |
-                      | - Translates REST to Serial @ 115200  |
-                      +---------------------------------------+
-                                          |
-                         Serial UART (Level-Shifted 3.3V)
-                                          |
-                                          v
-                      +---------------------------------------+
-                      |          Arduino UNO R3               |
-                      | - HW-130 / L293D 4WD Motor Shield     |
-                      | - HC-SR04 Ultrasonic Sonar Telemetry  |
-                      +---------------------------------------+
-                                          |
-                                 SoftwareSerial (9600)
-                                          |
-                                          v
-                      +---------------------------------------+
-                      |          Arduino Nano                 |
-                      | - 4x SG90 Micro-Servos (Base,         |
-                      |   Shoulder, Elbow, Gripper)           |
-                      +---------------------------------------+
++-------------------------------------------------------------------------------+
+|  Operator Smartphone (Mounted on Rover or Handheld)                           |
+|  - High-res rear camera preview via getUserMedia()                            |
+|  - On-demand "Capture Frame" action (JPEG/WebP)                               |
+|  - Tactical Web Dashboard on Next.js (HTTPS)                                  |
++-------------------------------------------------------------------------------+
+                                     |
+                       HTTPS POST /api/vision (Image Payload)
+                                     v
++-------------------------------------------------------------------------------+
+|  Next.js Server API (Vercel / Cloud)                                          |
+|  - Google Gemini Vision (generateContent API via GEMINI_API_KEY)              |
+|  - Strict JSON schema validation: sceneSummary, hazards, recommendedAction    |
+|  - Max 1000ms duration & speed clamping (0-255)                               |
++-------------------------------------------------------------------------------+
+                                     |
+                       Structured Recommendation (STOP / FORWARD / ARM...)
+                                     v
++-------------------------------------------------------------------------------+
+|  Operator Approval Gate (UI)                                                  |
+|  - Human-in-the-loop: Action NEVER executes without explicit operator approval |
+|  - Approve Action / Reject Action buttons + Immediate Emergency STOP         |
++-------------------------------------------------------------------------------+
+                                     |
+                       POST /api/relay (Authenticated with X-Rover-Token)
+                                     v
++-------------------------------------------------------------------------------+
+|  PC Backend Command Relay (pc_backend/app.py on Operator LAN)                 |
+|  - Bridges cloud HTTPS to local robot Wi-Fi network                           |
+|  - Validates allowlisted commands & enforces timeouts                         |
++-------------------------------------------------------------------------------+
+                                     |
+                       HTTP REST (Wi-Fi 802.11 b/g/n)
+                                     v
++-------------------------------------------------------------------------------+
+|  ESP32-CAM Wi-Fi Command Bridge (firmware/esp32_cam/)                        |
+|  - IP: 192.168.4.1 (SoftAP: NEX-ROVER-WIFI)                                   |
+|  - Translates /api/drive and /api/arm to UART Serial @ 115200 baud             |
++-------------------------------------------------------------------------------+
+                                     |
+                       Hardware UART (Level-Shifted 3.3V <-> 5V)
+                                     v
++-------------------------------------------------------------------------------+
+|  Arduino UNO R3 (firmware/arduino_uno/)                                       |
+|  - HW-130 / L293D 4WD Motor Shield (M1, M2, M3, M4)                           |
+|  - HC-SR04 Ultrasonic Sonar Telemetry (Trig A1, Echo A2)                      |
+|  - Relays "ARM:JOINT:ANGLE" to Nano via SoftwareSerial (9600 baud, Pins 9/10) |
++-------------------------------------------------------------------------------+
+                                     |
+                       SoftwareSerial @ 9600 baud
+                                     v
++-------------------------------------------------------------------------------+
+|  Arduino Nano (firmware/arduino_nano/)                                        |
+|  - Controls 4x SG90 Servos: Base (D3), Shoulder (D5), Elbow (D6), Gripper (D9)|
+|  - Smooth kinematic interpolation to prevent mechanical gear stripping        |
++-------------------------------------------------------------------------------+
 ```
 
 ---
 
-## Features
+## 2. Key Features
 
-- **Futuristic Tactical UI**: Dark cybersecurity / robotics design crafted for hackathon presentations and field operations.
-- **Dual Camera Viewport**: Seamlessly toggle between the robot's **ESP32-CAM stream** and the smartphone's **rear camera** using `navigator.mediaDevices.getUserMedia()`.
-- **4-Way Ergonomic D-Pad**: Touch and keyboard (WASD / Arrows) drive pad with **Hold-to-Drive** auto-stop and Center Stop.
-- **Precision PWM Motor Throttle**: 0-255 speed slider with Crawl (90), Cruise (160), and Turbo (255) presets.
-- **4-DOF Robotic Arm Control**:
-  - Independent angle sliders (0°-180°) for **Base**, **Shoulder**, **Elbow**, and **Gripper**.
-  - Interactive SVG **kinematic visualizer** showing real-time arm posture.
-  - Preset poses: *Park/Fold*, *Reach Forward*, *Pick Object*, *Grip Close*, *Wave Hello*.
-- **Live Sonar & Telemetry**: HC-SR04 obstacle distance indicator with radar gauge and automated collision alert (< 20 cm).
-- **Voice & Speech Control**:
-  - Real-time speech-to-text using the Web Speech API.
-  - Voice audio feedback through browser speech synthesis.
-- **Natural Language AI Terminal**:
-  - Predefined safe schema validation preventing arbitrary command execution.
-  - Offline zero-latency deterministic parser fallback for unreliable hackathon Wi-Fi.
-  - Cloud LLM proxy support (Google Gemini / OpenAI).
-- **Zero-Hardware Simulation Mode**: Fully functional simulation engine for judges and testers without requiring physical hardware.
-- **Instant Emergency STOP**: Dedicated high-priority E-Stop halting all actuators instantly.
+- **Mobile Rear-Camera Gemini Vision AI**:
+  - Live video stream using the phone's native rear camera (`facingMode: "environment"`).
+  - Explicit **Capture Frame** snapshot button with shutter flash animation.
+  - Submits frames directly to `/api/vision` powered by Google Gemini.
+  - Identifies detected objects, surface hazards, drops, obstacles, and recommends incremental safe actions.
+- **Operator Approval Gate (Human-in-the-Loop)**:
+  - Movements are **never automatically executed**.
+  - Operator inspects scene summary, hazards, speed, and duration before pressing **Approve & Execute** or **Reject**.
+- **Safe Command Relay**:
+  - All approved movements are bounded to a maximum of **1000 ms** duration.
+  - Automatically issues a stop (`S`) command when the duration expires.
+  - Routes requests via the authenticated Python PC backend (`pc_backend/`) to bridge HTTPS and local HTTP without mixed-content browser blocks.
+- **Emergency STOP (E-STOP)**:
+  - Prominent emergency stop button available on all screens.
+  - Immediately aborts active AI operations and motor drives.
+- **Tactical Dashboard & Manual Controls**:
+  - 4-way ergonomic drive pad with hold-to-drive auto-stop and keyboard shortcuts (`WASD`/arrows).
+  - PWM motor throttle slider (0–255) with *Crawl (90)*, *Cruise (160)*, and *Turbo (255)* presets.
+  - 4-DOF robotic arm sliders with live kinematic vector SVG visualizer.
+  - Voice controller with real-time speech recognition and audio speech feedback.
+  - Live ultrasonic distance gauge (HC-SR04) with collision alert (< 20 cm).
+  - Built-in simulation mode for testing when hardware is offline.
 
 ---
 
-## Getting Started
+## 3. Configuration & Environment Variables
 
-### Prerequisites
-
-- **Node.js** v18+ or v20+
-- **npm** or **pnpm**
-
-### Installation
-
+Copy `.env.example` to `.env.local` for local development:
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/nex-rover.git
-cd nex-rover
-
-# Install dependencies
-npm install
-
-# Copy environment template
 cp .env.example .env.local
 ```
 
-### Running Locally
+### Environment Variables Table
 
-```bash
-npm run dev
-```
+| Variable | Description | Required | Example |
+| :--- | :--- | :--- | :--- |
+| `GEMINI_API_KEY` | Google Gemini API Key for vision analysis | **Yes** (for AI Vision) | `AIzaSy...` |
+| `GEMINI_MODEL` | Gemini Model identifier | No (default: `gemini-1.5-flash`) | `gemini-1.5-flash` |
+| `PC_BACKEND_URL` | Local PC relay URL | **Yes** (for HTTPS hardware relay) | `http://127.0.0.1:5000` |
+| `ROVER_TOKEN` | Shared secret token between dashboard & PC backend | **Yes** (for relay auth) | `rover_secret_token_123` |
+| `ROBOT_ENDPOINT` | Direct ESP32-CAM address | No (default: `http://192.168.4.1`) | `http://192.168.4.1` |
+| `CAMERA_STREAM_URL`| ESP32-CAM stream URL | No | `http://192.168.4.1:81/stream` |
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
-
----
-
-## Testing on Physical Smartphone & HTTPS Deployment
-
-Modern mobile browsers (Chrome on Android, Safari on iOS) **require a secure context (HTTPS or localhost)** to grant access to the rear camera and microphone.
-
-### Method 1: Local Port Forwarding via ADB (Recommended for Android)
-
-1. Connect your Android phone to your PC via USB with USB Debugging enabled.
-2. In Google Chrome on your PC, navigate to `chrome://inspect/#devices`.
-3. Under **Port Forwarding**, forward port `3000` to `localhost:3000`.
-4. Open Chrome on your Android phone and navigate to `http://localhost:3000`.
-   *(Because it is accessed as `localhost`, Android treats it as a secure context, allowing rear camera and microphone access!)*
-
-### Method 2: Testing over Local Wi-Fi (0.0.0.0)
-
-1. Start Next.js bound to all local interfaces:
-   ```bash
-   npm run dev -- -H 0.0.0.0
-   ```
-2. Find your PC's local IP (e.g., `192.168.1.50`).
-3. On your phone connected to the same Wi-Fi, open `http://192.168.1.50:3000`.
-4. **Camera / Mic flag in Chrome Android**:
-   If accessing via plain HTTP over IP, navigate to `chrome://flags/#unsafely-treat-insecure-origin-as-secure` on Android Chrome, add `http://192.168.1.50:3000`, and restart Chrome.
-
-### Method 3: Cloudflare Tunnel / Ngrok (Instant HTTPS)
-
-```bash
-npx untun@latest tunnel http://localhost:3000
-# or
-npx localtunnel --port 3000
-```
-Open the generated HTTPS URL directly on your phone.
+### Setting Environment Variables in Vercel
+1. Open your project on Vercel: [https://vercel.com/rithishcodecraft-4430s-projects/nex-rover/settings/environment-variables](https://vercel.com/rithishcodecraft-4430s-projects/nex-rover/settings/environment-variables)
+2. Add:
+   - `GEMINI_API_KEY` = `your_api_key`
+   - `GEMINI_MODEL` = `gemini-1.5-flash`
+   - `ROVER_TOKEN` = `your_secret_token`
+   - `PC_BACKEND_URL` = `http://<your_pc_lan_ip>:5000` (or leave default if testing via local tunnel)
+3. Redeploy or push a new commit to apply.
 
 ---
 
-## HTTP API Contract
+## 4. PC Backend Relay Setup (`pc_backend/`)
 
-The dashboard communicates with the ESP32-CAM via standard JSON REST endpoints:
-
-### 1. Drive Command
-- **Endpoint**: `POST /api/drive`
-- **Request Payload**:
-  ```json
-  { "command": "F" }
-  ```
-  *Allowed commands*: `"F"` (forward), `"B"` (backward), `"L"` (left), `"R"` (right), `"S"` (stop), `"V:180"` (set motor speed 0-255).
-- **Response**:
-  ```json
-  { "success": true, "command": "F" }
-  ```
-
-### 2. Robotic Arm Command
-- **Endpoint**: `POST /api/arm`
-- **Request Payload**:
-  ```json
-  { "joint": "BASE", "angle": 90 }
-  ```
-  *Allowed joints*: `"BASE"`, `"SHOULDER"`, `"ELBOW"`, `"GRIPPER"`.
-  *Angle range*: `0` to `180`.
-- **Response**:
-  ```json
-  { "success": true, "joint": "BASE", "angle": 90 }
-  ```
-
-### 3. Telemetry & Health Status
-- **Endpoint**: `GET /api/status`
-- **Response**:
-  ```json
-  {
-    "connected": true,
-    "obstacleDistanceCm": 38,
-    "batteryVoltage": 7.8,
-    "currentSpeed": 160,
-    "firmwareVersion": "NEX-ESP32-1.0",
-    "rssi": -52
-  }
-  ```
-
-### 4. Video Stream
-- **Endpoint**: `GET /stream` (or configurable in Settings modal)
-- **Response**: `multipart/x-mixed-replace; boundary=frame` MJPEG stream.
-
----
-
-## Arduino & ESP32 Firmware
-
-Complete source files are provided in the [`firmware/`](file:///firmware/) directory:
-- [esp32_cam_nexrover.ino](file:///firmware/esp32_cam/esp32_cam_nexrover.ino): AI-Thinker ESP32-CAM Wi-Fi server, MJPEG streaming, and serial translation.
-- [arduino_uno_nexrover.ino](file:///firmware/arduino_uno/arduino_uno_nexrover.ino): Arduino UNO L293D motor shield control, HC-SR04 sonar, and Nano relay.
-- [arduino_nano_arm.ino](file:///firmware/arduino_nano/arduino_nano_arm.ino): Arduino Nano 4-DOF SG90 servo kinematic controller.
-
-See [ESP32_FIRMWARE_GUIDE.md](file:///ESP32_FIRMWARE_GUIDE.md) for step-by-step schematics, pinout tables, level shifting, and flashing instructions.
-
----
-
-## Python PC Backend (Vision & AI Proxy)
-
-The `pc_backend/` directory provides an optional lightweight Python Flask service for offloading GPT-4o-mini vision analysis:
-- **Image Inspection (`POST /api/analyze`)**: Analyzes camera captures for obstacles, drop-offs, stairs, or humans, suggesting safe commands (`F`, `B`, `L`, `R`, `S`) with mandatory operator approval.
-- **Authenticated Command Proxy (`POST /api/command`)**: Securely relays validated drive and arm commands to the ESP32-CAM via `X-Rover-Token`.
+The Python Flask backend runs on the operator's laptop/PC (connected to the same Wi-Fi as the ESP32 rover) to safely receive commands from the cloud dashboard and forward them to the rover.
 
 ```bash
 cd pc_backend
+
+# 1. Create and activate Python virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Or on Windows: .venv\Scripts\activate
+# On Windows:
+.venv\Scripts\activate
+# On Linux/macOS:
+source .venv/bin/activate
+
+# 2. Install dependencies
 pip install -r requirements.txt
-cp .env.example .env       # Configure OPENAI_API_KEY, ESP32_URL, ROVER_TOKEN
+
+# 3. Configure environment
+cp .env.example .env
+# Edit .env with your settings:
+# ESP32_URL=http://192.168.4.1
+# ROVER_TOKEN=your_secure_rover_secret_token_here
+# PORT=5000
+
+# 4. Start the backend
 python app.py
+```
+
+The PC backend will start on `http://127.0.0.1:5000`. Test health:
+```bash
+curl http://127.0.0.1:5000/health
+# Response: {"ok": true, "service": "nex-rover-pc-backend", "esp32_configured": true}
 ```
 
 ---
 
-## Safety Features
+## 5. Hardware UART Wiring & Pinout Guide
 
-1. **Physical E-Stop**: The red E-STOP button sends an immediate halt to all motors and servos.
-2. **Auto-Stop on Release**: When using hold-to-drive mode, releasing touch or mouse immediately transmits an `'S'` stop command.
-3. **Collision Avoidance**: If the HC-SR04 ultrasonic sensor detects an obstacle within 10 cm, forward motion is automatically inhibited in firmware.
-4. **AI Action Containment**: Natural language inputs are strictly mapped to predefined action types (`DRIVE`, `ARM`, `SPEED`, `STOP`). Raw shell commands or arbitrary code cannot be executed.
+> [!WARNING]
+> **ESP32-CAM uses 3.3V logic!** Connecting Arduino UNO TX (5V) directly to ESP32-CAM RX (3.3V) can damage the ESP32. Use a 1kΩ / 2kΩ resistor voltage divider.
+
+### Hardware Interconnect Table
+
+| From Component | Pin | To Component | Pin | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **ESP32-CAM** | `TX (GPIO 1)` | **Arduino UNO** | `RX (Pin 0)` | **115200 baud** (Direct connection is safe) |
+| **Arduino UNO** | `TX (Pin 1)` | **Voltage Divider** | `1kΩ resistor` | 5V side |
+| **Voltage Divider** | `1kΩ / 2kΩ tap`| **ESP32-CAM** | `RX (GPIO 3)` | Steps down 5V to **3.33V** |
+| **ESP32-CAM** | `GND` | **Arduino UNO** | `GND` | **Common Ground is MANDATORY** |
+| **ESP32-CAM** | `5V` | **External 5V Power**| `5V 2A` | Do not power ESP32 from UNO 3.3V |
+| **Arduino UNO** | `Pin 10 (TX)` | **Arduino Nano** | `RX (Pin D0)` | **9600 baud** (Arm command relay) |
+| **Arduino UNO** | `Pin 9 (RX)` | **Arduino Nano** | `TX (Pin D1)` | **9600 baud** |
+| **Arduino UNO** | `Trig (Pin A1)`| **HC-SR04** | `Trig` | Ultrasonic trigger |
+| **Arduino UNO** | `Echo (Pin A2)`| **HC-SR04** | `Echo` | Ultrasonic echo |
+| **Arduino Nano** | `Pin D3` | **Base Servo** | Signal (Orange) | SG90 0°–180° |
+| **Arduino Nano** | `Pin D5` | **Shoulder Servo**| Signal (Orange) | SG90 0°–180° |
+| **Arduino Nano** | `Pin D6` | **Elbow Servo** | Signal (Orange) | SG90 0°–180° |
+| **Arduino Nano** | `Pin D9` | **Gripper Servo** | Signal (Orange) | SG90 0°–180° |
+| **Servos (All 4)**| `VCC (Red)` | **Buck Converter**| `5V 3A Out` | **Never power 4 servos from Nano 5V pin!** |
 
 ---
 
-## License
+## 6. Pre-Flight Hardware Verification Checklist
 
-MIT License. Designed and built for the SBU Hackathon.
+Before running autonomous or vision-assisted movements, complete this checklist:
+
+1. [ ] **Common Ground**: Verify a single shared ground wire connects the battery negative, ESP32 GND, UNO GND, and Nano GND.
+2. [ ] **Voltage Divider on ESP32 RX**: Confirm 1kΩ in series from UNO TX to ESP32 RX, and 2kΩ from ESP32 RX to GND.
+3. [ ] **Servo Power Supply**: Ensure all 4 SG90 servos are powered from a separate 5V 3A buck converter (e.g. LM2596), not the Arduino's 5V pin.
+4. [ ] **Motor Shield Power**: Verify the HW-130 / L293D shield receives dedicated battery power on its `EXT_PWR` terminals with the power jumper removed if exceeding 9V.
+5. [ ] **ESP32-CAM Boot State**: Confirm `GPIO 0` is disconnected from `GND` so the ESP32 boots in normal operational mode.
+6. [ ] **SoftAP Verification**: Connect phone or PC Wi-Fi to **`NEX-ROVER-WIFI`** (password: `rover1234`).
+7. [ ] **Serial Diagnostics**: Verify Arduino UNO serial baud rate matches `115200` and Nano matches `9600`.
+8. [ ] **Sonar Obstacle Test**: Place a hand 15 cm in front of the HC-SR04 sonar; verify the dashboard displays proximity warning.
+
+---
+
+## 7. Step-by-Step Test Procedure for Mobile-Camera Gemini AI
+
+1. Open the dashboard on your smartphone over HTTPS: [https://nex-rover-sigma.vercel.app](https://nex-rover-sigma.vercel.app)
+2. Switch to the **"Phone Cam"** tab in the camera panel.
+3. Tap **"Enable Rear Camera"** and grant browser camera permissions.
+4. Point the smartphone's camera at the terrain in front of the rover.
+5. Tap **"Capture Frame for Gemini AI"**. Notice the shutter flash and frame thumbnail preview.
+6. (Optional) Adjust the task prompt (e.g., *"Inspect path for obstacles and suggest safe detour"*).
+7. Tap **"Analyze with Gemini"**. The server endpoint `/api/vision` queries Gemini and validates the JSON output.
+8. Review the results:
+   - **Scene Assessment** and **Detected Objects**.
+   - **Hazards & Constraints** (highlighted in red if drop-offs, stairs, or obstacles are present).
+   - **Recommended Action** (e.g. `FORWARD [600ms, Speed: 130]`).
+9. Notice the **Operator Approval Required** banner. The robot remains stationary until you take action.
+10. Tap **"Approve & Execute"** to transmit the command through the authenticated relay to the rover.
+11. Tap **"E-STOP"** at any time to immediately interrupt any active motion.
+
+---
+
+## 8. License
+
+MIT License. Built for the SBU Hackathon.
