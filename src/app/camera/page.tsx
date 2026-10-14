@@ -29,6 +29,8 @@ export default function MobileCameraPage() {
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [streamError, setStreamError] = useState<string | null>(null);
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
+  const [availableDevices, setAvailableDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
 
   // Vision Analysis State
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
@@ -48,6 +50,23 @@ export default function MobileCameraPage() {
 
   // Wake Lock Ref
   const wakeLockRef = useRef<any>(null);
+
+  // Enumerate all available camera devices
+  const enumerateCameras = useCallback(async () => {
+    try {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter((d) => d.kind === 'videoinput');
+      setAvailableDevices(
+        videoInputs.map((d, index) => ({
+          deviceId: d.deviceId,
+          label: d.label || `Camera ${index + 1}`,
+        }))
+      );
+    } catch {
+      // Ignore
+    }
+  }, []);
 
   // Request WakeLock to keep mobile screen on while rover camera is mounted
   const requestWakeLock = useCallback(async () => {
@@ -86,72 +105,103 @@ export default function MobileCameraPage() {
     releaseWakeLock();
   }, [mediaStream, releaseWakeLock]);
 
-  // Start mobile camera with facingMode
-  const startCamera = useCallback(async (targetFacing = facingMode) => {
-    setStreamError(null);
-    try {
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((track) => track.stop());
-      }
+  // Start mobile camera with facingMode or specific deviceId
+  const startCamera = useCallback(
+    async (targetFacing = facingMode, deviceIdOverride?: string) => {
+      setStreamError(null);
+      try {
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+        }
 
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: { ideal: targetFacing },
-          width: { ideal: 1280, max: 1920 },
-          height: { ideal: 720, max: 1080 },
-        },
-        audio: false,
-      };
+        const devId = deviceIdOverride || selectedDeviceId;
+        const videoConstraints: MediaTrackConstraints = devId
+          ? { deviceId: { exact: devId } }
+          : {
+              facingMode: { ideal: targetFacing },
+              width: { ideal: 1280, max: 1920 },
+              height: { ideal: 720, max: 1080 },
+            };
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      setMediaStream(stream);
+        const constraints: MediaStreamConstraints = {
+          video: videoConstraints,
+          audio: false,
+        };
 
-      if (videoRef.current) {
-        const video = videoRef.current;
-        video.srcObject = stream;
-        video.muted = true;
-        try {
-          await video.play();
-        } catch (playErr: any) {
-          if (playErr.name !== 'AbortError') {
-            console.warn('Camera play warning:', playErr);
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        setMediaStream(stream);
+
+        const activeTrack = stream.getVideoTracks()[0];
+        if (activeTrack) {
+          const trackSettings = activeTrack.getSettings();
+          if (trackSettings.deviceId) {
+            setSelectedDeviceId(trackSettings.deviceId);
           }
         }
-      }
 
-      setCameraActive(true);
-      requestWakeLock();
-    } catch (err: unknown) {
-      stopCamera();
-      if (err instanceof DOMException) {
-        if (err.name === 'AbortError') {
-          // Benign play interruption during fast stream switches, do not surface as error
-          return;
+        if (videoRef.current) {
+          const video = videoRef.current;
+          video.srcObject = stream;
+          video.muted = true;
+          video.onloadedmetadata = () => {
+            video.play().catch(() => {});
+          };
+          try {
+            await video.play();
+          } catch (playErr: any) {
+            if (playErr.name !== 'AbortError') {
+              console.warn('Camera play warning:', playErr);
+            }
+          }
         }
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          setStreamError('Camera permission denied. Please allow camera access in browser site settings.');
-        } else if (err.name === 'NotFoundError') {
-          setStreamError(`No physical ${targetFacing === 'environment' ? 'rear' : 'front'} camera detected on device.`);
-        } else if (err.name === 'NotReadableError') {
-          setStreamError('Camera is currently in use by another application or tab.');
+
+        setCameraActive(true);
+        requestWakeLock();
+        await enumerateCameras();
+      } catch (err: unknown) {
+        stopCamera();
+        if (err instanceof DOMException) {
+          if (err.name === 'AbortError') {
+            return;
+          }
+          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            setStreamError('Camera permission denied. Please allow camera access in browser site settings.');
+          } else if (err.name === 'NotFoundError') {
+            setStreamError(`No physical ${targetFacing === 'environment' ? 'rear' : 'front'} camera detected.`);
+          } else if (err.name === 'NotReadableError') {
+            setStreamError('Camera is currently in use by another application or tab.');
+          } else {
+            setStreamError(`Camera error: ${err.message}`);
+          }
         } else {
-          setStreamError(`Camera error: ${err.message}`);
+          setStreamError('Failed to access device camera.');
         }
-      } else {
-        setStreamError('Failed to access device camera.');
       }
-    }
-  }, [facingMode, mediaStream, requestWakeLock, stopCamera]);
+    },
+    [facingMode, mediaStream, selectedDeviceId, requestWakeLock, stopCamera, enumerateCameras]
+  );
 
   // Switch facing mode (Front vs Rear)
   const switchFacing = async () => {
     const next = facingMode === 'environment' ? 'user' : 'environment';
     setFacingMode(next);
+    setSelectedDeviceId(null); // Reset specific device override on flip
     if (cameraActive) {
       stopCamera();
       setTimeout(() => {
         startCamera(next);
-      }, 200);
+      }, 150);
+    }
+  };
+
+  // Switch to specific camera device (e.g. from multi-camera dropdown)
+  const selectCameraDevice = async (deviceId: string) => {
+    setSelectedDeviceId(deviceId);
+    if (cameraActive) {
+      stopCamera();
+      setTimeout(() => {
+        startCamera(facingMode, deviceId);
+      }, 150);
     }
   };
 
@@ -408,6 +458,56 @@ export default function MobileCameraPage() {
             </div>
           )}
         </div>
+
+        {/* Camera Device Selector & Lens Switch Bar */}
+        <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shadow-inner">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <Camera className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span className="text-[11px] font-mono text-slate-400 shrink-0">Device:</span>
+            {availableDevices.length > 0 ? (
+              <select
+                value={selectedDeviceId || ''}
+                onChange={(e) => selectCameraDevice(e.target.value)}
+                className="bg-slate-800 border border-slate-700 text-cyan-300 text-xs font-mono rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-cyan-500 w-full truncate cursor-pointer hover:border-slate-600 transition-colors"
+              >
+                {availableDevices.map((dev, idx) => (
+                  <option key={dev.deviceId || idx} value={dev.deviceId}>
+                    {dev.label || `Camera ${idx + 1}`}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-xs font-mono text-cyan-300 truncate">
+                {facingMode === 'environment' ? 'Rear / Main Camera' : 'Front / User Camera'}
+              </span>
+            )}
+          </div>
+
+          <button
+            onClick={switchFacing}
+            className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-mono text-xs font-bold active:scale-95 transition-all shrink-0 shadow-sm"
+          >
+            <SwitchCamera className="w-3.5 h-3.5" />
+            <span>Flip Lens ({facingMode === 'environment' ? 'Rear' : 'Front'})</span>
+          </button>
+        </div>
+
+        {/* Shutter / IR Black Feed Helper Notice */}
+        {cameraActive && (
+          <div className="px-3 py-2 rounded-xl bg-cyan-950/40 border border-cyan-800/40 text-[11px] font-mono text-cyan-300/90 flex items-start gap-2">
+            <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
+            <div className="leading-relaxed">
+              <span className="font-bold text-white">Seeing a black screen?</span> On laptops, tap{' '}
+              <button
+                onClick={switchFacing}
+                className="font-bold text-cyan-200 underline hover:text-white"
+              >
+                Flip Lens
+              </button>{' '}
+              to switch from the Windows IR sensor to your color webcam, or open your laptop physical privacy shutter.
+            </div>
+          </div>
+        )}
 
         {/* Primary Camera & AI Controls */}
         <div className="grid grid-cols-2 gap-2">
