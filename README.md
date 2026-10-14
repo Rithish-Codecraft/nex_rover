@@ -1,5 +1,8 @@
 # NEX-ROVER — Mobile Robot Control Dashboard
 
+[![Vercel Deployment](https://img.shields.io/badge/Deployed_on-Vercel-black?style=for-the-badge&logo=vercel)](https://nex-rover-sigma.vercel.app)
+**Live Dashboard**: [https://nex-rover-sigma.vercel.app](https://nex-rover-sigma.vercel.app)
+
 A dark, futuristic, mobile-first web dashboard for **NEX-ROVER**, a four-wheel-drive robotic rover featuring a 4-DOF robotic arm, ESP32-CAM video stream, phone camera preview, ultrasonic obstacle detection, and natural-language AI voice control.
 
 ---
