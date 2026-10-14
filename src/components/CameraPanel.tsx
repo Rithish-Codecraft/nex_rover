@@ -50,6 +50,10 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
   const [remoteSnapshot, setRemoteSnapshot] = useState<PhoneCameraSnapshot | null>(null);
   const [remoteAgeMs, setRemoteAgeMs] = useState<number | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [remoteTimestamp, setRemoteTimestamp] = useState<string | null>(null);
+  const [remoteDimensions, setRemoteDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [remoteHttpStatus, setRemoteHttpStatus] = useState<number | null>(null);
+  const [remoteStorageBackend, setRemoteStorageBackend] = useState<string | null>(null);
   const [isRemotePolling, setIsRemotePolling] = useState<boolean>(true);
 
   // ESP32 Stream State
@@ -128,41 +132,70 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
   };
 
   // Remote Phone Relay Polling Loop (/api/camera/stream)
+  // Adaptive polling (1500ms interval, pauses when document is hidden)
   useEffect(() => {
     if (activeSource !== 'remote-phone' || !isRemotePolling) return;
 
     let isMounted = true;
+    let pollTimeout: NodeJS.Timeout | null = null;
+
     const fetchRemoteFrame = async () => {
+      // Pause polling when browser tab/window is hidden
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        if (isMounted) {
+          pollTimeout = setTimeout(fetchRemoteFrame, 2000);
+        }
+        return;
+      }
+
       try {
         const res = await fetch('/api/camera/stream');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (isMounted) setRemoteHttpStatus(res.status);
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
         const data = await res.json();
 
         if (isMounted) {
+          setRemoteStorageBackend(data.storageBackend || null);
           if (data.ok && data.hasFrame && data.snapshot) {
             setRemoteSnapshot(data.snapshot);
             setRemoteAgeMs(data.ageMs || 0);
+            setRemoteTimestamp(new Date(data.snapshot.timestamp).toLocaleTimeString());
+            setRemoteDimensions({
+              width: Number(data.snapshot.width) || 1280,
+              height: Number(data.snapshot.height) || 720,
+            });
             setRemoteError(null);
           } else {
             setRemoteAgeMs(data.ageMs || null);
             if (data.isStale) {
-              setRemoteError('Phone camera feed is stale (>10s). Check /camera on mobile.');
+              setRemoteError('Phone camera feed is stale (>10s). Re-open /camera on mobile phone.');
+            } else if (!data.hasFrame) {
+              setRemoteError(data.message || 'Waiting for mobile camera frames.');
             }
           }
         }
       } catch (err: unknown) {
         if (isMounted) {
-          setRemoteError('Failed to fetch remote mobile frame.');
+          const msg = err instanceof Error ? err.message : 'Network fetch failed';
+          setRemoteError(`Relay fetch error: ${msg}`);
+        }
+      } finally {
+        if (isMounted) {
+          // Adaptive schedule: 1500ms normal
+          pollTimeout = setTimeout(fetchRemoteFrame, 1500);
         }
       }
     };
 
     fetchRemoteFrame();
-    const interval = setInterval(fetchRemoteFrame, 800); // 800ms poll for live snapshot preview
 
     return () => {
       isMounted = false;
-      clearInterval(interval);
+      if (pollTimeout) clearTimeout(pollTimeout);
     };
   }, [activeSource, isRemotePolling]);
 
@@ -288,6 +321,22 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
 
         {/* Viewport Utilities */}
         <div className="flex items-center gap-1.5">
+          {activeSource === 'remote-phone' && (
+            <button
+              type="button"
+              onClick={() => setIsRemotePolling((prev) => !prev)}
+              title={isRemotePolling ? 'Pause Remote Polling' : 'Resume Remote Polling'}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono border transition-colors ${
+                isRemotePolling
+                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                  : 'bg-slate-900 text-slate-500 border-slate-800'
+              }`}
+            >
+              <RefreshCw className={`w-3 h-3 ${isRemotePolling ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">{isRemotePolling ? 'Live' : 'Paused'}</span>
+            </button>
+          )}
+
           {activeSource === 'local-device' && (
             <button
               onClick={switchCameraFacing}
@@ -543,6 +592,65 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
           </div>
         )}
       </div>
+
+      {/* Laptop Diagnostic Display for Rover Phone Cam */}
+      {activeSource === 'remote-phone' && (
+        <div className="px-3 py-1.5 bg-slate-950/90 border-t border-slate-800 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[11px] font-mono">
+          <div className="flex items-center gap-3">
+            <span className="text-slate-500">
+              Frame Time:{' '}
+              <strong className={remoteTimestamp ? 'text-slate-200' : 'text-slate-600'}>
+                {remoteTimestamp || 'Awaiting stream'}
+              </strong>
+            </span>
+
+            {remoteDimensions && (
+              <span className="text-slate-500">
+                Res:{' '}
+                <strong className="text-cyan-400">
+                  {remoteDimensions.width}x{remoteDimensions.height}
+                </strong>
+              </span>
+            )}
+
+            {remoteAgeMs !== null && (
+              <span className="text-slate-500">
+                Age:{' '}
+                <strong className={remoteAgeMs < 4000 ? 'text-emerald-400' : 'text-amber-400'}>
+                  {remoteAgeMs}ms
+                </strong>
+              </span>
+            )}
+
+            {remoteStorageBackend && (
+              <span className="text-slate-500">
+                Store:{' '}
+                <strong className="text-indigo-300">
+                  {remoteStorageBackend}
+                </strong>
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {remoteError ? (
+              <span className="text-rose-400 text-[10px] flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" />
+                <span>{remoteError}</span>
+              </span>
+            ) : remoteSnapshot ? (
+              <span className="text-emerald-400 text-[10px] flex items-center gap-1">
+                <Check className="w-3 h-3" />
+                <span>Frame rendered (HTTP {remoteHttpStatus || 200})</span>
+              </span>
+            ) : (
+              <span className="text-amber-400 text-[10px]">
+                {remoteHttpStatus ? `HTTP ${remoteHttpStatus}` : 'Polling relay...'}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Frame Capture Action Bar */}
       <div className="px-3 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between gap-2">

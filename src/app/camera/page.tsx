@@ -8,29 +8,94 @@ import {
   SwitchCamera,
   Eye,
   AlertTriangle,
-  CheckCircle,
   RefreshCw,
-  Shield,
-  Layers,
   Sparkles,
   ArrowLeft,
   Sliders,
-  Send,
   Zap,
+  Activity,
+  Check,
+  Bug,
+  UploadCloud,
 } from 'lucide-react';
 import { GeminiVisionRecommendation, DetectedObject } from '@/types/robot';
+
+type CameraState = 'idle' | 'requesting_permission' | 'streaming' | 'error';
+
+interface CameraErrorDetails {
+  name: string;
+  message: string;
+}
+
+interface VideoDiagnostics {
+  readyState: number;
+  readyStateLabel: string;
+  videoWidth: number;
+  videoHeight: number;
+  paused: boolean;
+  currentTime: number;
+}
+
+interface TrackDiagnostics {
+  readyState: string;
+  enabled: boolean;
+  muted: boolean;
+  label: string;
+}
+
+const READY_STATE_MAP: Record<number, string> = {
+  0: '0 - HAVE_NOTHING',
+  1: '1 - HAVE_METADATA',
+  2: '2 - HAVE_CURRENT_DATA',
+  3: '3 - HAVE_FUTURE_DATA',
+  4: '4 - HAVE_ENOUGH_DATA',
+};
 
 export default function MobileCameraPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Camera State
+  // 1. Core Camera State
+  const [cameraState, setCameraState] = useState<CameraState>('idle');
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [lastError, setLastError] = useState<CameraErrorDetails | null>(null);
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [availableDevices, setAvailableDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+
+  // Diagnostics State
+  const [isSecureContext, setIsSecureContext] = useState<boolean | null>(null);
+  const [hasGetUserMedia, setHasGetUserMedia] = useState<boolean | null>(null);
+  const [permissionState, setPermissionState] = useState<string>('checking');
+  const [videoDiag, setVideoDiag] = useState<VideoDiagnostics>({
+    readyState: 0,
+    readyStateLabel: '0 - HAVE_NOTHING',
+    videoWidth: 0,
+    videoHeight: 0,
+    paused: true,
+    currentTime: 0,
+  });
+  const [trackDiag, setTrackDiag] = useState<TrackDiagnostics | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(true);
+
+  // Capture Test State
+  const [testCaptureUrl, setTestCaptureUrl] = useState<string | null>(null);
+  const [testCaptureBytes, setTestCaptureBytes] = useState<number | null>(null);
+  const [testCaptureError, setTestCaptureError] = useState<string | null>(null);
+  const [testCaptureTimestamp, setTestCaptureTimestamp] = useState<string | null>(null);
+
+  // Snapshot Relay Instrumentation State
+  const [relayHttpStatus, setRelayHttpStatus] = useState<number | null>(null);
+  const [relayResponseBody, setRelayResponseBody] = useState<string | null>(null);
+  const [relayNetworkError, setRelayNetworkError] = useState<string | null>(null);
+  const [relayLatencyMs, setRelayLatencyMs] = useState<number | null>(null);
+  const [isTestRelaying, setIsTestRelaying] = useState<boolean>(false);
+  const [testRelayResult, setTestRelayResult] = useState<string | null>(null);
+  const [laptopActive, setLaptopActive] = useState<boolean>(false);
+  const [storageBackend, setStorageBackend] = useState<string | null>(null);
+  const [relayStatus, setRelayStatus] = useState<'idle' | 'streaming' | 'error'>('idle');
 
   // Vision Analysis State
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
@@ -41,15 +106,75 @@ export default function MobileCameraPage() {
 
   // Continuous Auto-Analyze State
   const [autoAnalyzeEnabled, setAutoAnalyzeEnabled] = useState<boolean>(false);
-  const [autoIntervalSec, setAutoIntervalSec] = useState<number>(5); // 3, 5, or 10 seconds
+  const [autoIntervalSec, setAutoIntervalSec] = useState<number>(5);
   const [countdown, setCountdown] = useState<number>(5);
-
-  // Shutter Flash & Relay Status
   const [shutterFlash, setShutterFlash] = useState<boolean>(false);
-  const [relayStatus, setRelayStatus] = useState<'idle' | 'streaming' | 'error'>('idle');
 
   // Wake Lock Ref
-  const wakeLockRef = useRef<any>(null);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
+  // Initial environment verification & permissions query (deferred to avoid set-state-in-effect)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (typeof window !== 'undefined') {
+        setIsSecureContext(window.isSecureContext);
+        setHasGetUserMedia(Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
+
+        if ('permissions' in navigator && navigator.permissions.query) {
+          navigator.permissions
+            .query({ name: 'camera' as PermissionName })
+            .then((status) => {
+              setPermissionState(status.state);
+              status.onchange = () => {
+                setPermissionState(status.state);
+              };
+            })
+            .catch(() => {
+              setPermissionState('unsupported');
+            });
+        } else {
+          setPermissionState('unsupported');
+        }
+      }
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Periodic video & track diagnostics updater
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (videoRef.current) {
+        const v = videoRef.current;
+        setVideoDiag({
+          readyState: v.readyState,
+          readyStateLabel: READY_STATE_MAP[v.readyState] || `Unknown (${v.readyState})`,
+          videoWidth: v.videoWidth || 0,
+          videoHeight: v.videoHeight || 0,
+          paused: v.paused,
+          currentTime: Math.round(v.currentTime * 10) / 10,
+        });
+      }
+
+      if (mediaStream) {
+        const track = mediaStream.getVideoTracks()[0];
+        if (track) {
+          setTrackDiag({
+            readyState: track.readyState,
+            enabled: track.enabled,
+            muted: track.muted,
+            label: track.label || 'Video Track',
+          });
+        } else {
+          setTrackDiag(null);
+        }
+      } else {
+        setTrackDiag(null);
+      }
+    }, 400);
+
+    return () => clearInterval(interval);
+  }, [mediaStream]);
 
   // Enumerate all available camera devices
   const enumerateCameras = useCallback(async () => {
@@ -68,14 +193,14 @@ export default function MobileCameraPage() {
     }
   }, []);
 
-  // Request WakeLock to keep mobile screen on while rover camera is mounted
+  // Screen WakeLock management
   const requestWakeLock = useCallback(async () => {
     try {
-      if ('wakeLock' in navigator && (navigator as any).wakeLock) {
-        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+      if ('wakeLock' in navigator && (navigator as Navigator & { wakeLock?: { request: (type: string) => Promise<WakeLockSentinel> } }).wakeLock) {
+        wakeLockRef.current = await (navigator as Navigator & { wakeLock: { request: (type: string) => Promise<WakeLockSentinel> } }).wakeLock.request('screen');
       }
     } catch {
-      // Wake lock request may be denied on low battery
+      // Denied or unsupported
     }
   }, []);
 
@@ -86,7 +211,7 @@ export default function MobileCameraPage() {
         wakeLockRef.current = null;
       }
     } catch {
-      // Ignore error
+      // Ignore
     }
   }, []);
 
@@ -100,119 +225,251 @@ export default function MobileCameraPage() {
       videoRef.current.srcObject = null;
     }
     setCameraActive(false);
+    setCameraState('idle');
     setAutoAnalyzeEnabled(false);
     setRelayStatus('idle');
     releaseWakeLock();
   }, [mediaStream, releaseWakeLock]);
 
-  // Start mobile camera with facingMode or specific deviceId
+  // Error handling helper declared before startCamera to respect immutability
+  const handleCameraInitError = useCallback(
+    (err: unknown) => {
+      stopCamera();
+      const name = err instanceof Error ? err.name : (err as { name?: string })?.name || 'UnknownError';
+      const message = err instanceof Error ? err.message : (err as { message?: string })?.message || 'Failed to initialize camera.';
+      setLastError({ name, message });
+      setCameraState('error');
+
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        setStreamError('Camera permission denied. Please allow camera access in browser site settings.');
+      } else if (name === 'NotReadableError') {
+        setStreamError('Camera hardware is busy or in use by another application.');
+      } else if (name === 'OverconstrainedError') {
+        setStreamError('Requested camera constraints could not be satisfied by device hardware.');
+      } else if (name === 'NotFoundError') {
+        setStreamError('No physical camera device was found on this hardware.');
+      } else if (name === 'AbortError') {
+        setStreamError('Camera initialization was interrupted by a new request or the operating system.');
+      } else {
+        setStreamError(`Camera error (${name}): ${message}`);
+      }
+    },
+    [stopCamera]
+  );
+
+  // Robust Camera Start Handler with Strict Validation & Fallback
   const startCamera = useCallback(
     async (targetFacing = facingMode, deviceIdOverride?: string) => {
+      setCameraState('requesting_permission');
       setStreamError(null);
-      try {
-        if (mediaStream) {
-          mediaStream.getTracks().forEach((track) => track.stop());
-        }
+      setLastError(null);
 
-        const devId = deviceIdOverride || selectedDeviceId;
-        const videoConstraints: MediaTrackConstraints = devId
+      // Stop all old media tracks before starting or restarting
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+        setMediaStream(null);
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+
+      // Verify browser API availability
+      if (typeof window !== 'undefined' && !window.isSecureContext) {
+        const err = {
+          name: 'InsecureContextError',
+          message: 'Camera access requires a secure context (HTTPS or localhost).',
+        };
+        setLastError(err);
+        setStreamError(err.message);
+        setCameraState('error');
+        return;
+      }
+
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+        const err = {
+          name: 'UnsupportedBrowserAPI',
+          message: 'navigator.mediaDevices.getUserMedia is not supported on this browser.',
+        };
+        setLastError(err);
+        setStreamError(err.message);
+        setCameraState('error');
+        return;
+      }
+
+      const devId = deviceIdOverride || selectedDeviceId;
+      let stream: MediaStream | null = null;
+
+      // Attempt 1: Rear camera with ideal resolution constraints
+      const primaryConstraints: MediaStreamConstraints = {
+        audio: false,
+        video: devId
           ? { deviceId: { exact: devId } }
           : {
               facingMode: { ideal: targetFacing },
-              width: { ideal: 1280, max: 1920 },
-              height: { ideal: 720, max: 1080 },
-            };
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+      };
 
-        const constraints: MediaStreamConstraints = {
-          video: videoConstraints,
-          audio: false,
-        };
-
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        setMediaStream(stream);
-
-        const activeTrack = stream.getVideoTracks()[0];
-        if (activeTrack) {
-          const trackSettings = activeTrack.getSettings();
-          if (trackSettings.deviceId) {
-            setSelectedDeviceId(trackSettings.deviceId);
-          }
-        }
-
-        if (videoRef.current) {
-          const video = videoRef.current;
-          video.srcObject = stream;
-          video.muted = true;
-          video.onloadedmetadata = () => {
-            video.play().catch(() => {});
-          };
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(primaryConstraints);
+      } catch (primaryErr: unknown) {
+        const errName = primaryErr instanceof Error ? primaryErr.name : (primaryErr as { name?: string })?.name || '';
+        // If OverconstrainedError or NotFoundError, retry with basic video: true fallback
+        if (errName === 'OverconstrainedError' || errName === 'NotFoundError') {
           try {
-            await video.play();
-          } catch (playErr: any) {
-            if (playErr.name !== 'AbortError') {
-              console.warn('Camera play warning:', playErr);
-            }
-          }
-        }
-
-        setCameraActive(true);
-        requestWakeLock();
-        await enumerateCameras();
-      } catch (err: unknown) {
-        stopCamera();
-        if (err instanceof DOMException) {
-          if (err.name === 'AbortError') {
+            console.warn(`Primary constraints failed (${errName}), retrying with fallback { video: true }`);
+            stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+          } catch (fallbackErr: unknown) {
+            handleCameraInitError(fallbackErr);
             return;
           }
-          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-            setStreamError('Camera permission denied. Please allow camera access in browser site settings.');
-          } else if (err.name === 'NotFoundError') {
-            setStreamError(`No physical ${targetFacing === 'environment' ? 'rear' : 'front'} camera detected.`);
-          } else if (err.name === 'NotReadableError') {
-            setStreamError('Camera is currently in use by another application or tab.');
-          } else {
-            setStreamError(`Camera error: ${err.message}`);
-          }
         } else {
-          setStreamError('Failed to access device camera.');
+          handleCameraInitError(primaryErr);
+          return;
         }
       }
+
+      if (!stream) {
+        handleCameraInitError(new Error('No media stream returned from getUserMedia.'));
+        return;
+      }
+
+      // Record selected device ID from active track
+      const activeTrack = stream.getVideoTracks()[0];
+      if (activeTrack) {
+        const trackSettings = activeTrack.getSettings();
+        if (trackSettings.deviceId) {
+          setSelectedDeviceId(trackSettings.deviceId);
+        }
+      }
+
+      // Attach stream to video element
+      if (!videoRef.current) {
+        handleCameraInitError(new Error('Video element ref unavailable.'));
+        return;
+      }
+
+      const video = videoRef.current;
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+
+      // Explicitly await video.play() and report failures visibly
+      try {
+        await video.play();
+      } catch (playErr: unknown) {
+        const pErr = playErr instanceof Error ? playErr : (playErr as { name?: string; message?: string });
+        if (pErr?.name === 'AbortError') {
+          console.warn('Play request aborted by browser:', playErr);
+        } else {
+          const errInfo = {
+            name: pErr?.name || 'PlayError',
+            message: pErr?.message || 'video.play() failed',
+          };
+          setLastError(errInfo);
+          setStreamError(`Failed to play video stream: ${errInfo.message}`);
+          setCameraState('error');
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+      }
+
+      // Wait for video metadata AND confirm videoWidth > 0 and videoHeight > 0
+      try {
+        await new Promise<void>((resolve, reject) => {
+          let resolved = false;
+
+          const checkDimensions = () => {
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
+              resolved = true;
+              resolve();
+            }
+          };
+
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            resolve();
+            return;
+          }
+
+          video.onloadedmetadata = checkDimensions;
+          video.onplaying = checkDimensions;
+
+          // 5-second timeout waiting for frames
+          setTimeout(() => {
+            if (!resolved) {
+              if (video.videoWidth > 0 && video.videoHeight > 0) {
+                resolve();
+              } else {
+                reject(
+                  new Error(
+                    `Video element received stream but dimensions remained zero (${video.videoWidth}x${video.videoHeight}). Check camera permissions or physical shutter.`
+                  )
+                );
+              }
+            }
+          }, 5000);
+        });
+      } catch (dimErr: unknown) {
+        const dErr = dimErr instanceof Error ? dimErr : (dimErr as { message?: string });
+        const errInfo = {
+          name: 'InvalidDimensionsError',
+          message: dErr.message || 'Stream active but dimensions are 0x0',
+        };
+        setLastError(errInfo);
+        setStreamError(errInfo.message);
+        setCameraState('error');
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      // Only mark connected after video.play() and dimensions > 0 are verified
+      setMediaStream(stream);
+      setCameraActive(true);
+      setCameraState('streaming');
+      requestWakeLock();
+      await enumerateCameras();
     },
-    [facingMode, mediaStream, selectedDeviceId, requestWakeLock, stopCamera, enumerateCameras]
+    [facingMode, selectedDeviceId, mediaStream, requestWakeLock, enumerateCameras, handleCameraInitError]
   );
 
-  // Switch facing mode (Front vs Rear)
+  // Switch facing mode
   const switchFacing = async () => {
     const next = facingMode === 'environment' ? 'user' : 'environment';
     setFacingMode(next);
-    setSelectedDeviceId(null); // Reset specific device override on flip
+    setSelectedDeviceId(null);
     if (cameraActive) {
       stopCamera();
       setTimeout(() => {
         startCamera(next);
-      }, 150);
+      }, 200);
     }
   };
 
-  // Switch to specific camera device (e.g. from multi-camera dropdown)
+  // Switch specific device
   const selectCameraDevice = async (deviceId: string) => {
     setSelectedDeviceId(deviceId);
     if (cameraActive) {
       stopCamera();
       setTimeout(() => {
         startCamera(facingMode, deviceId);
-      }, 150);
+      }, 200);
     }
   };
 
-  // Capture current video frame into JPEG dataUrl
+  // Capture current video frame into JPEG dataUrl (with dimensions check)
   const captureCurrentFrame = useCallback((): string | null => {
     if (!videoRef.current || !canvasRef.current) return null;
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    const width = video.videoWidth || 1280;
-    const height = video.videoHeight || 720;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+
+    if (!width || !height || width <= 0 || height <= 0) {
+      return null;
+    }
+
     canvas.width = width;
     canvas.height = height;
 
@@ -220,17 +477,149 @@ export default function MobileCameraPage() {
     if (!ctx) return null;
 
     ctx.drawImage(video, 0, 0, width, height);
-    return canvas.toDataURL('image/jpeg', 0.85);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+    if (!dataUrl || dataUrl.length < 50 || dataUrl === 'data:,') {
+      return null;
+    }
+
+    return dataUrl;
   }, []);
+
+  // Requirement 3: Capture Test Action
+  const testCaptureFrame = () => {
+    setTestCaptureError(null);
+    if (!videoRef.current || !canvasRef.current) {
+      setTestCaptureError('Video or canvas reference is not available.');
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video.videoWidth || !video.videoHeight || video.videoWidth <= 0 || video.videoHeight <= 0) {
+      setTestCaptureError(`Invalid video dimensions: ${video.videoWidth}x${video.videoHeight}. Cannot capture frame.`);
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      setTestCaptureError('Canvas 2D context unavailable.');
+      return;
+    }
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+    if (!dataUrl || dataUrl.length < 50 || dataUrl === 'data:,') {
+      setTestCaptureError('Canvas encoding failed or produced empty image data.');
+      return;
+    }
+
+    const base64Data = dataUrl.split(',')[1] || '';
+    const bytes = Math.round((base64Data.length * 3) / 4);
+
+    setTestCaptureUrl(dataUrl);
+    setTestCaptureBytes(bytes);
+    setTestCaptureTimestamp(new Date().toLocaleTimeString());
+  };
+
+  // Requirement 4: Snapshot Relay Helper
+  const sendRelayFrame = useCallback(
+    async (frameUrl: string, width: number, height: number): Promise<boolean> => {
+      const t0 = performance.now();
+      try {
+        const res = await fetch('/api/camera/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataUrl: frameUrl,
+            width,
+            height,
+            facingMode,
+          }),
+        });
+
+        const elapsed = Math.round(performance.now() - t0);
+        setRelayLatencyMs(elapsed);
+        setRelayHttpStatus(res.status);
+
+        const bodyText = await res.text();
+        setRelayResponseBody(bodyText.slice(0, 160));
+
+        if (!res.ok) {
+          setRelayStatus('error');
+          setRelayNetworkError(`HTTP ${res.status}: ${bodyText}`);
+          return false;
+        }
+
+        const data = JSON.parse(bodyText);
+        setLaptopActive(Boolean(data.laptopActive));
+        setStorageBackend(data.storageBackend || null);
+        setRelayStatus(data.laptopActive ? 'streaming' : 'idle');
+        setRelayNetworkError(null);
+        return true;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Network request failed.';
+        setRelayStatus('error');
+        setRelayHttpStatus(0);
+        setRelayNetworkError(msg);
+        return false;
+      }
+    },
+    [facingMode]
+  );
+
+  // Requirement 4: Single Frame Test Relay Button
+  const testRelaySingleFrame = async () => {
+    setIsTestRelaying(true);
+    setTestRelayResult(null);
+
+    const frame = captureCurrentFrame();
+    if (!frame) {
+      setTestRelayResult('Failed: No valid frame captured (dimensions 0x0 or encoding failure).');
+      setIsTestRelaying(false);
+      return;
+    }
+
+    const w = videoRef.current?.videoWidth || 1280;
+    const h = videoRef.current?.videoHeight || 720;
+    const success = await sendRelayFrame(frame, w, h);
+    if (success) {
+      setTestRelayResult(`Success: Relayed ${w}x${h} frame (HTTP 200).`);
+    } else {
+      setTestRelayResult('Failed: Check relay diagnostics for error details.');
+    }
+    setIsTestRelaying(false);
+  };
+
+  // Automated Snapshot Relay Loop (Only runs while streaming)
+  useEffect(() => {
+    if (cameraState !== 'streaming' || !cameraActive) return;
+
+    const relayInterval = setInterval(async () => {
+      const frameUrl = captureCurrentFrame();
+      if (!frameUrl) return;
+
+      const w = videoRef.current?.videoWidth || 1280;
+      const h = videoRef.current?.videoHeight || 720;
+      await sendRelayFrame(frameUrl, w, h);
+    }, 1800); // 1.8s adaptive relay loop
+
+    return () => clearInterval(relayInterval);
+  }, [cameraState, cameraActive, captureCurrentFrame, sendRelayFrame]);
 
   // Send single frame to Gemini AI Vision API
   const analyzeFrame = useCallback(async () => {
     if (!cameraActive || isAnalyzing) return;
 
     const dataUrl = captureCurrentFrame();
-    if (!dataUrl) return;
+    if (!dataUrl) {
+      setAnalysisError('Cannot analyze: Video dimensions are invalid or camera is not producing frames.');
+      return;
+    }
 
-    // Trigger visual shutter flash
     setShutterFlash(true);
     setTimeout(() => setShutterFlash(false), 200);
 
@@ -261,34 +650,6 @@ export default function MobileCameraPage() {
       setIsAnalyzing(false);
     }
   }, [cameraActive, captureCurrentFrame, isAnalyzing, taskPrompt]);
-
-  // Relay preview snapshot to laptop dashboard (/api/camera/stream)
-  useEffect(() => {
-    if (!cameraActive) return;
-
-    const relayInterval = setInterval(async () => {
-      const frameUrl = captureCurrentFrame();
-      if (!frameUrl) return;
-
-      try {
-        await fetch('/api/camera/stream', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dataUrl: frameUrl,
-            width: videoRef.current?.videoWidth || 1280,
-            height: videoRef.current?.videoHeight || 720,
-            facingMode,
-          }),
-        });
-        setRelayStatus('streaming');
-      } catch {
-        setRelayStatus('error');
-      }
-    }, 1500); // 1.5s preview frame relay
-
-    return () => clearInterval(relayInterval);
-  }, [cameraActive, captureCurrentFrame, facingMode]);
 
   // Continuous Auto-Analyze Countdown Loop
   useEffect(() => {
@@ -331,7 +692,7 @@ export default function MobileCameraPage() {
           </Link>
           <div>
             <h1 className="text-xs font-mono font-bold tracking-wider text-cyan-400 flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+              <span className={`w-2 h-2 rounded-full ${cameraState === 'streaming' ? 'bg-cyan-400 animate-pulse' : 'bg-slate-600'}`} />
               NEX-ROVER MOBILE CAM
             </h1>
             <p className="text-[10px] font-mono text-slate-400">Mount on Rover Chassis</p>
@@ -339,22 +700,49 @@ export default function MobileCameraPage() {
         </div>
 
         <div className="flex items-center gap-1.5">
-          {/* Laptop Stream Relay Badge */}
+          {/* Laptop Stream Relay Badge - Only reports sync when laptop actually receives frames */}
           <div
             className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono border ${
-              relayStatus === 'streaming'
+              laptopActive
                 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                : relayStatus === 'error'
+                ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                : cameraActive
+                ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
                 : 'bg-slate-800 text-slate-400 border-slate-700'
             }`}
             title="Relaying live preview frames to laptop dashboard"
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                relayStatus === 'streaming' ? 'bg-emerald-400 animate-ping' : 'bg-slate-500'
+                laptopActive
+                  ? 'bg-emerald-400 animate-ping'
+                  : cameraActive
+                  ? 'bg-amber-400'
+                  : 'bg-slate-500'
               }`}
             />
-            <span>{relayStatus === 'streaming' ? 'LAPTOP SYNC' : 'OFFLINE'}</span>
+            <span>
+              {laptopActive
+                ? 'LAPTOP SYNC'
+                : cameraActive
+                ? 'WAITING FOR LAPTOP'
+                : 'OFFLINE'}
+            </span>
           </div>
+
+          {/* Toggle Diagnostics Panel */}
+          <button
+            onClick={() => setShowDiagnostics(!showDiagnostics)}
+            title="Toggle Camera Diagnostics Panel"
+            className={`p-2 rounded-lg border text-xs transition-all ${
+              showDiagnostics
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            <Bug className="w-4 h-4" />
+          </button>
 
           {/* Camera Switcher */}
           <button
@@ -380,7 +768,6 @@ export default function MobileCameraPage() {
             ref={videoRef}
             playsInline
             muted
-            autoPlay
             className={`w-full h-full object-cover transition-opacity duration-300 ${
               cameraActive ? 'opacity-100' : 'opacity-0'
             }`}
@@ -396,21 +783,37 @@ export default function MobileCameraPage() {
                 Rover Camera ({facingMode === 'environment' ? 'Rear Lens' : 'Front Lens'})
               </h2>
               <p className="text-xs font-mono text-slate-400 mt-1 max-w-xs">
-                Position your phone at the front of the rover and tap Start Camera below.
+                {cameraState === 'requesting_permission'
+                  ? 'Requesting camera permission from browser...'
+                  : 'Position your phone on the rover chassis and tap Start Camera below.'}
               </p>
 
               {streamError && (
                 <div className="mt-3 p-3 rounded-lg bg-rose-950/70 border border-rose-500/40 text-xs font-mono text-rose-300 text-left flex items-start gap-2 max-w-xs">
                   <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
-                  <span>{streamError}</span>
+                  <div>
+                    <div className="font-bold">{lastError?.name || 'Camera Error'}</div>
+                    <div className="text-[11px] text-rose-300/80 mt-0.5">{streamError}</div>
+                  </div>
                 </div>
               )}
 
               <button
                 onClick={() => startCamera()}
-                className="mt-4 flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-mono text-xs font-bold tracking-wide shadow-lg shadow-cyan-950 active:scale-95 transition-all"
+                disabled={cameraState === 'requesting_permission'}
+                className="mt-4 flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white font-mono text-xs font-bold tracking-wide shadow-lg shadow-cyan-950 active:scale-95 transition-all"
               >
-                <Camera className="w-4 h-4" /> Start Camera
+                {cameraState === 'requesting_permission' ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Connecting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Camera className="w-4 h-4" />
+                    <span>Start Camera</span>
+                  </>
+                )}
               </button>
             </div>
           )}
@@ -422,7 +825,7 @@ export default function MobileCameraPage() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md border border-cyan-500/40 text-[10px] font-mono text-cyan-300">
                   <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
-                  <span>LIVE • {facingMode.toUpperCase()}</span>
+                  <span>LIVE • {videoDiag.videoWidth}x{videoDiag.videoHeight}</span>
                 </div>
 
                 {autoAnalyzeEnabled && (
@@ -492,23 +895,6 @@ export default function MobileCameraPage() {
           </button>
         </div>
 
-        {/* Shutter / IR Black Feed Helper Notice */}
-        {cameraActive && (
-          <div className="px-3 py-2 rounded-xl bg-cyan-950/40 border border-cyan-800/40 text-[11px] font-mono text-cyan-300/90 flex items-start gap-2">
-            <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
-            <div className="leading-relaxed">
-              <span className="font-bold text-white">Seeing a black screen?</span> On laptops, tap{' '}
-              <button
-                onClick={switchFacing}
-                className="font-bold text-cyan-200 underline hover:text-white"
-              >
-                Flip Lens
-              </button>{' '}
-              to switch from the Windows IR sensor to your color webcam, or open your laptop physical privacy shutter.
-            </div>
-          </div>
-        )}
-
         {/* Primary Camera & AI Controls */}
         <div className="grid grid-cols-2 gap-2">
           {cameraActive ? (
@@ -521,7 +907,8 @@ export default function MobileCameraPage() {
           ) : (
             <button
               onClick={() => startCamera()}
-              className="flex items-center justify-center gap-2 py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-mono text-xs font-bold active:scale-95 transition-all shadow-md shadow-cyan-950"
+              disabled={cameraState === 'requesting_permission'}
+              className="flex items-center justify-center gap-2 py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white font-mono text-xs font-bold active:scale-95 transition-all shadow-md shadow-cyan-950"
             >
               <Camera className="w-4 h-4" /> Start Camera
             </button>
@@ -549,6 +936,193 @@ export default function MobileCameraPage() {
             )}
           </button>
         </div>
+
+        {/* Requirement 1: Visible Camera Diagnostics Panel */}
+        {showDiagnostics && (
+          <section className="p-3.5 rounded-xl bg-slate-900/90 border border-cyan-500/30 flex flex-col gap-2.5 font-mono text-xs shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <div className="flex items-center gap-1.5 text-cyan-400 font-bold">
+                <Activity className="w-4 h-4" />
+                <span>Camera Hardware Diagnostics</span>
+              </div>
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                  cameraState === 'streaming'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    : cameraState === 'error'
+                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                    : cameraState === 'requesting_permission'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                    : 'bg-slate-800 text-slate-400'
+                }`}
+              >
+                State: {cameraState}
+              </span>
+            </div>
+
+            {/* Diagnostics Key-Value Grid */}
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+              <div>
+                <span className="text-slate-500">Secure Context:</span>{' '}
+                <span className={isSecureContext ? 'text-emerald-400' : 'text-rose-400'}>
+                  {isSecureContext === null ? 'Checking...' : isSecureContext ? 'Yes (HTTPS)' : 'No (Insecure)'}
+                </span>
+              </div>
+
+              <div>
+                <span className="text-slate-500">getUserMedia:</span>{' '}
+                <span className={hasGetUserMedia ? 'text-emerald-400' : 'text-rose-400'}>
+                  {hasGetUserMedia ? 'Supported' : 'Missing'}
+                </span>
+              </div>
+
+              <div>
+                <span className="text-slate-500">Permission:</span>{' '}
+                <span className="text-cyan-300 capitalize">{permissionState}</span>
+              </div>
+
+              <div>
+                <span className="text-slate-500">Video Dimensions:</span>{' '}
+                <span className={videoDiag.videoWidth > 0 ? 'text-emerald-400 font-bold' : 'text-amber-400'}>
+                  {videoDiag.videoWidth} x {videoDiag.videoHeight}
+                </span>
+              </div>
+
+              <div>
+                <span className="text-slate-500">Video readyState:</span>{' '}
+                <span className="text-slate-200">{videoDiag.readyStateLabel}</span>
+              </div>
+
+              <div>
+                <span className="text-slate-500">Video Paused:</span>{' '}
+                <span className={videoDiag.paused ? 'text-amber-400' : 'text-emerald-400'}>
+                  {videoDiag.paused ? 'Yes' : 'No'} ({videoDiag.currentTime}s)
+                </span>
+              </div>
+
+              {trackDiag && (
+                <>
+                  <div>
+                    <span className="text-slate-500">Track State:</span>{' '}
+                    <span className="text-cyan-300">
+                      {trackDiag.readyState} (Muted: {trackDiag.muted ? 'Yes' : 'No'})
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Track Label:</span>{' '}
+                    <span className="text-slate-300 truncate block" title={trackDiag.label}>
+                      {trackDiag.label}
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Error Message Section if Present */}
+            {lastError && (
+              <div className="p-2.5 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300 text-[11px]">
+                <div className="font-bold flex items-center gap-1 text-rose-400">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>{lastError.name}</span>
+                </div>
+                <div className="mt-0.5 text-rose-200/90">{lastError.message}</div>
+              </div>
+            )}
+
+            {/* Diagnostic Actions: Capture Test & Test Relay */}
+            <div className="pt-2 border-t border-slate-800 flex flex-col gap-2">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={testCaptureFrame}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-bold active:scale-95 transition-all"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>Test Capture</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={testRelaySingleFrame}
+                  disabled={isTestRelaying}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-indigo-300 border border-slate-700 text-xs font-bold active:scale-95 transition-all"
+                >
+                  {isTestRelaying ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <UploadCloud className="w-3.5 h-3.5" />
+                  )}
+                  <span>Test Relay</span>
+                </button>
+              </div>
+
+              {/* Requirement 3: Capture Test Result Display */}
+              {testCaptureError && (
+                <div className="p-2 rounded bg-rose-950/50 border border-rose-500/30 text-rose-300 text-[11px]">
+                  Capture Error: {testCaptureError}
+                </div>
+              )}
+
+              {testCaptureUrl && (
+                <div className="p-2.5 rounded bg-slate-950 border border-slate-800 flex items-center gap-3">
+                  <img
+                    src={testCaptureUrl}
+                    alt="Captured Test Preview"
+                    className="w-16 h-12 object-cover rounded border border-slate-700"
+                  />
+                  <div className="text-[11px] text-slate-300 flex-1">
+                    <div className="text-emerald-400 font-bold flex items-center gap-1">
+                      <Check className="w-3 h-3" /> Valid Frame Encoded
+                    </div>
+                    <div>Size: {((testCaptureBytes || 0) / 1024).toFixed(1)} KB ({testCaptureBytes} bytes)</div>
+                    <div className="text-[10px] text-slate-500">Captured at {testCaptureTimestamp}</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Requirement 4: Snapshot Relay Result Display */}
+              {(relayHttpStatus !== null || testRelayResult) && (
+                <div className="p-2 rounded bg-slate-950 border border-slate-800 text-[11px] flex flex-col gap-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Relay HTTP Status:</span>
+                    <span
+                      className={`font-bold ${
+                        relayHttpStatus === 200 ? 'text-emerald-400' : 'text-rose-400'
+                      }`}
+                    >
+                      {relayHttpStatus ? `HTTP ${relayHttpStatus}` : 'Network Error'} ({relayLatencyMs}ms)
+                    </span>
+                  </div>
+
+                  {storageBackend && (
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-500">Transport Store:</span>
+                      <span className="text-cyan-300">{storageBackend}</span>
+                    </div>
+                  )}
+
+                  {relayResponseBody && (
+                    <div className="text-[10px] text-slate-400 truncate">
+                      Resp: {relayResponseBody}
+                    </div>
+                  )}
+
+                  {relayNetworkError && (
+                    <div className="text-[10px] text-rose-400">
+                      Error: {relayNetworkError}
+                    </div>
+                  )}
+
+                  {testRelayResult && (
+                    <div className="text-[10px] text-indigo-300 font-bold pt-1 border-t border-slate-800/80">
+                      {testRelayResult}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
 
         {/* Continuous Auto-Analyze Configuration Bar */}
         <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col gap-2.5">
@@ -631,7 +1205,12 @@ export default function MobileCameraPage() {
               </span>
             </div>
 
-            {/* Scene Summary */}
+            {analysisError && (
+              <div className="p-2.5 rounded bg-rose-950/60 border border-rose-500/40 text-xs font-mono text-rose-300">
+                {analysisError}
+              </div>
+            )}
+
             <div>
               <div className="text-[10px] font-mono text-slate-500 uppercase">Scene Summary</div>
               <p className="text-xs font-mono text-slate-200 mt-0.5 leading-relaxed">
@@ -639,7 +1218,6 @@ export default function MobileCameraPage() {
               </p>
             </div>
 
-            {/* Detected Objects List */}
             {recommendation.detectedObjects && recommendation.detectedObjects.length > 0 && (
               <div>
                 <div className="text-[10px] font-mono text-slate-500 uppercase mb-1">
@@ -660,7 +1238,6 @@ export default function MobileCameraPage() {
               </div>
             )}
 
-            {/* Hazards List */}
             {recommendation.hazards && recommendation.hazards.length > 0 && (
               <div className="p-2.5 rounded-lg bg-rose-950/40 border border-rose-500/30">
                 <div className="text-[10px] font-mono text-rose-400 uppercase font-bold flex items-center gap-1 mb-1">
@@ -674,7 +1251,6 @@ export default function MobileCameraPage() {
               </div>
             )}
 
-            {/* Reasoning & Movement Details */}
             <div className="text-xs font-mono text-slate-400 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80">
               <span className="text-slate-500 text-[10px] uppercase block mb-0.5">Reasoning</span>
               {recommendation.reason}
