@@ -13,6 +13,7 @@ import {
   ShieldAlert,
   Sparkles,
   Check,
+  SwitchCamera,
 } from 'lucide-react';
 import { RobotSettings, CapturedFrame } from '@/types/robot';
 
@@ -34,6 +35,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
   const [activeSource, setActiveSource] = useState<'esp32' | 'phone'>('esp32');
   const [phoneStreamActive, setPhoneStreamActive] = useState<boolean>(false);
   const [phoneStreamError, setPhoneStreamError] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [espStreamKey, setEspStreamKey] = useState<number>(0);
   const [espImgError, setEspImgError] = useState<boolean>(false);
   const [hudVisible, setHudVisible] = useState<boolean>(true);
@@ -57,8 +59,8 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
     setPhoneStreamActive(false);
   };
 
-  // Start smartphone rear camera preview using getUserMedia
-  const startPhoneCamera = async () => {
+  // Start smartphone camera preview using getUserMedia with specified facingMode
+  const startPhoneCamera = async (targetFacing: 'environment' | 'user' = facingMode) => {
     setPhoneStreamError(null);
 
     if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -69,14 +71,14 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
     }
 
     try {
-      // Request rear camera by default with optimal mobile constraints
+      // First try with ideal facing mode
       const constraints: MediaStreamConstraints = {
         video: {
-          facingMode: { ideal: 'environment' },
+          facingMode: { ideal: targetFacing },
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
-        audio: false, // Mic is requested separately when user engages voice
+        audio: false,
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -93,19 +95,33 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
           setPhoneStreamError('Camera permission was denied. Allow camera access in browser site settings.');
         } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-          setPhoneStreamError('No physical camera device detected on this device.');
+          setPhoneStreamError(`No physical ${targetFacing === 'environment' ? 'rear' : 'front'} camera detected.`);
         } else if (err.name === 'NotReadableError') {
           setPhoneStreamError('Camera is already in use by another application.');
         } else {
           setPhoneStreamError(`Camera error: ${err.message}`);
         }
       } else {
-        setPhoneStreamError('Failed to initialize phone camera.');
+        setPhoneStreamError('Failed to initialize device camera.');
       }
     }
   };
 
-  // Clean up streams when component unmounts or when switching away
+  // Switch between Rear (environment) and Front (user / selfie) camera
+  const switchCameraFacing = async () => {
+    const nextFacing = facingMode === 'environment' ? 'user' : 'environment';
+    setFacingMode(nextFacing);
+
+    if (phoneStreamActive) {
+      stopPhoneCamera();
+      // Brief delay to allow mobile camera hardware to release before reopening
+      setTimeout(() => {
+        startPhoneCamera(nextFacing);
+      }, 150);
+    }
+  };
+
+  // Clean up streams when component unmounts
   useEffect(() => {
     return () => {
       stopPhoneCamera();
@@ -117,7 +133,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
     setEspStreamKey(Date.now());
   };
 
-  // Capture frame from the active rear camera video element into canvas
+  // Capture frame from active camera into offscreen canvas
   const handleCaptureFrame = () => {
     if (!videoRef.current || !canvasRef.current) return;
     const video = videoRef.current;
@@ -188,8 +204,20 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
           </button>
         </div>
 
-        {/* Viewport Utilities */}
+        {/* Viewport Utilities & Camera Switcher */}
         <div className="flex items-center gap-1.5">
+          {/* Camera Flip / Switcher Button (Enabled on Phone Cam) */}
+          {activeSource === 'phone' && (
+            <button
+              onClick={switchCameraFacing}
+              title={`Switch camera (Currently: ${facingMode === 'environment' ? 'Rear Lens' : 'Front Lens'})`}
+              className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[11px] font-mono font-medium transition-all active:scale-95"
+            >
+              <SwitchCamera className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="hidden sm:inline">{facingMode === 'environment' ? 'Rear' : 'Front'}</span>
+            </button>
+          )}
+
           <button
             onClick={() => setHudVisible(!hudVisible)}
             title="Toggle Tactical HUD Overlays"
@@ -212,8 +240,8 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
             </button>
           ) : (
             <button
-              onClick={phoneStreamActive ? stopPhoneCamera : startPhoneCamera}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium transition-colors ${
+              onClick={() => (phoneStreamActive ? stopPhoneCamera() : startPhoneCamera())}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-mono font-medium transition-colors ${
                 phoneStreamActive
                   ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                   : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
@@ -221,11 +249,11 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
             >
               {phoneStreamActive ? (
                 <>
-                  <VideoOff className="w-3 h-3" /> Stop Cam
+                  <VideoOff className="w-3 h-3" /> Stop
                 </>
               ) : (
                 <>
-                  <Camera className="w-3 h-3" /> Start Cam
+                  <Camera className="w-3 h-3" /> Start
                 </>
               )}
             </button>
@@ -265,7 +293,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
                 </h4>
                 <p className="text-xs text-slate-400 mt-1 font-mono">
                   {settings.isSimulated
-                    ? 'Switch to "Phone Cam" tab to capture frames with your phone camera for Gemini Vision!'
+                    ? 'Switch to "Phone Cam" tab to capture frames with your device camera for Gemini Vision!'
                     : `Connecting to ${settings.cameraStreamUrl}. Verify ESP32-CAM power, Wi-Fi connection, and IP.`}
                 </p>
                 <div className="flex gap-2 mt-4">
@@ -290,7 +318,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
           </div>
         )}
 
-        {/* Source 2: Phone Camera (Rear Camera by default) */}
+        {/* Source 2: Phone Camera (Switchable between Rear & Front) */}
         {activeSource === 'phone' && (
           <div className="relative w-full h-full flex items-center justify-center bg-black">
             <video
@@ -307,10 +335,10 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
                   <Camera className="w-7 h-7" />
                 </div>
                 <h4 className="text-sm font-bold text-slate-200 font-mono tracking-wide">
-                  Smartphone Camera Viewport
+                  Device Camera ({facingMode === 'environment' ? 'Rear Lens' : 'Front Lens'})
                 </h4>
                 <p className="text-xs text-slate-400 mt-1 font-mono">
-                  Provides high-resolution vision feed for Gemini AI navigation and obstacle inspection.
+                  Use your phone or laptop camera for Gemini AI vision and live navigation.
                 </p>
 
                 {phoneStreamError && (
@@ -320,12 +348,22 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
                   </div>
                 )}
 
-                <button
-                  onClick={startPhoneCamera}
-                  className="mt-4 flex items-center gap-1.5 px-4 py-2 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-mono font-bold tracking-wide shadow-md shadow-cyan-950 active:scale-95 transition-all"
-                >
-                  <Camera className="w-4 h-4" /> Enable Rear Camera
-                </button>
+                <div className="flex items-center justify-center gap-2 mt-4">
+                  <button
+                    onClick={() => startPhoneCamera()}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-mono font-bold tracking-wide shadow-md shadow-cyan-950 active:scale-95 transition-all"
+                  >
+                    <Camera className="w-4 h-4" /> Start {facingMode === 'environment' ? 'Rear' : 'Front'} Cam
+                  </button>
+                  <button
+                    onClick={switchCameraFacing}
+                    title="Switch camera lens"
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono border border-slate-700 active:scale-95 transition-all"
+                  >
+                    <SwitchCamera className="w-4 h-4 text-cyan-400" />
+                    <span>Flip to {facingMode === 'environment' ? 'Front' : 'Rear'}</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -339,7 +377,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
               <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/60 backdrop-blur-sm border border-cyan-500/30 text-[10px] font-mono text-cyan-300">
                 <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
                 <span>
-                  SOURCE: {activeSource === 'esp32' ? 'ESP32-CAM' : 'PHONE-REAR'}
+                  SOURCE: {activeSource === 'esp32' ? 'ESP32-CAM' : `DEVICE-${facingMode.toUpperCase()}`}
                 </span>
               </div>
 
@@ -374,7 +412,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
                 THROTTLE: {currentSpeed}/255
               </span>
               <span className="px-2 py-0.5 rounded bg-black/60 backdrop-blur-sm border border-slate-800">
-                FPS: ~30 • AUTO-EXP
+                LENS: {facingMode === 'environment' ? 'BACK/REAR' : 'FRONT/USER'}
               </span>
             </div>
           </div>
@@ -383,7 +421,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
 
       {/* Frame Capture Action Bar (Visible when Phone Camera is Active) */}
       {activeSource === 'phone' && phoneStreamActive && (
-        <div className="px-3 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between">
+        <div className="px-3 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -391,19 +429,30 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-mono text-xs font-bold shadow-md shadow-cyan-950 active:scale-95 transition-all"
             >
               <Camera className="w-3.5 h-3.5" />
-              <span>Capture Frame for Gemini AI</span>
+              <span>Capture Frame</span>
+            </button>
+
+            {/* Switch Camera Button in Active Toolbar */}
+            <button
+              type="button"
+              onClick={switchCameraFacing}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-medium active:scale-95 transition-all"
+              title="Flip to Front/Rear camera"
+            >
+              <SwitchCamera className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Flip ({facingMode === 'environment' ? 'Rear' : 'Front'})</span>
             </button>
 
             {capturedFrame && (
-              <span className="flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
+              <span className="hidden sm:flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
                 <Check className="w-3 h-3" />
-                Frame Snapshot Ready
+                Snapshot Ready
               </span>
             )}
           </div>
 
-          <div className="text-[10px] font-mono text-slate-500 hidden sm:block">
-            Rear 720p HD Feed
+          <div className="text-[10px] font-mono text-slate-500 hidden md:block">
+            {facingMode === 'environment' ? 'Rear Camera (720p HD)' : 'Front Camera'}
           </div>
         </div>
       )}
