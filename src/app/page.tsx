@@ -1,0 +1,392 @@
+'use client';
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Header } from '@/components/Header';
+import { CameraPanel } from '@/components/CameraPanel';
+import { DrivePad } from '@/components/DrivePad';
+import { MotorSpeedControl } from '@/components/MotorSpeedControl';
+import { ArmController } from '@/components/ArmController';
+import { TelemetryCard } from '@/components/TelemetryCard';
+import { VoiceController } from '@/components/VoiceController';
+import { ChatPanel } from '@/components/ChatPanel';
+import { SettingsModal } from '@/components/SettingsModal';
+import { SimulationBanner } from '@/components/SimulationOverlay';
+
+import {
+  RobotSettings,
+  TelemetryData,
+  DriveCommand,
+  ArmJoint,
+  ArmPosePreset,
+  ChatMessage,
+  ValidatedRobotAction,
+  DEFAULT_ARM_ANGLES,
+} from '@/types/robot';
+import { RobotApiClient } from '@/lib/robot-api';
+import { parseWithCloudLLM } from '@/lib/ai-command-parser';
+import { SpeechHandler } from '@/lib/speech';
+
+export default function RoverDashboardPage() {
+  // Settings State - defaults to Simulation Mode first so judges/users can test immediately!
+  const [settings, setSettings] = useState<RobotSettings>({
+    robotIp: 'http://192.168.4.1',
+    cameraStreamUrl: 'http://192.168.4.1:81/stream',
+    isSimulated: true,
+    holdToDrive: true,
+    pollIntervalMs: 1000,
+    speechAudioFeedback: true,
+    commandTimeoutMs: 2000,
+  });
+
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+
+  // Live Telemetry
+  const [telemetry, setTelemetry] = useState<TelemetryData>({
+    connected: true,
+    latencyMs: 8,
+    batteryVoltage: 7.8,
+    obstacleDistanceCm: 45,
+    currentSpeed: 160,
+    arm: { ...DEFAULT_ARM_ANGLES },
+    lastCommand: 'S',
+    lastSeen: null,
+    isSimulated: true,
+    firmwareVersion: 'NEX-SIM-v1.0',
+  });
+
+  // Chat History
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: 'welcome-1',
+      sender: 'rover',
+      text: 'NEX-ROVER systems initialized. Ready for telemetry stream or voice / manual commands.',
+      timestamp: 'INIT',
+    },
+  ]);
+  const [isAiProcessing, setIsAiProcessing] = useState(false);
+
+  // API Client & Speech References
+  const apiClientRef = useRef<RobotApiClient>(new RobotApiClient(settings));
+  const speechRef = useRef<SpeechHandler | null>(null);
+  const autoStopTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Update API Client settings when state changes
+  useEffect(() => {
+    apiClientRef.current.updateSettings(settings);
+  }, [settings]);
+
+  // Audio Speech Handler setup
+  useEffect(() => {
+    speechRef.current = new SpeechHandler();
+  }, []);
+
+  const speakConfirmation = useCallback((text: string) => {
+    if (settings.speechAudioFeedback && speechRef.current) {
+      speechRef.current.speak(text);
+    }
+  }, [settings.speechAudioFeedback]);
+
+  // Telemetry Polling Loop
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const data = await apiClientRef.current.fetchTelemetry();
+        setTelemetry(data);
+      } catch {
+        // Handled inside client
+      }
+    }, settings.pollIntervalMs);
+
+    return () => clearInterval(interval);
+  }, [settings.pollIntervalMs, settings.isSimulated]);
+
+  // Drive Command Execution
+  const handleDriveCommand = useCallback(async (command: DriveCommand) => {
+    // Clear any previous timed movement
+    if (autoStopTimeoutRef.current) {
+      clearTimeout(autoStopTimeoutRef.current);
+      autoStopTimeoutRef.current = null;
+    }
+
+    await apiClientRef.current.sendDriveCommand(command);
+    setTelemetry((prev) => ({
+      ...prev,
+      lastCommand: command,
+    }));
+  }, []);
+
+  // Speed Command Execution
+  const handleSetSpeed = useCallback(async (speed: number) => {
+    await apiClientRef.current.sendSpeedCommand(speed);
+    setTelemetry((prev) => ({
+      ...prev,
+      currentSpeed: speed,
+      lastCommand: `V:${speed}`,
+    }));
+  }, []);
+
+  // Arm Joint Angle Execution
+  const handleSetJointAngle = useCallback(async (joint: ArmJoint, angle: number) => {
+    await apiClientRef.current.sendArmCommand(joint, angle);
+    setTelemetry((prev) => ({
+      ...prev,
+      arm: {
+        ...prev.arm,
+        [joint]: angle,
+      },
+      lastCommand: `ARM:${joint}:${angle}`,
+    }));
+  }, []);
+
+  // Arm Preset Pose Execution
+  const handleApplyPreset = useCallback(async (preset: ArmPosePreset) => {
+    // Send each joint with slight stagger
+    const joints: ArmJoint[] = ['BASE', 'SHOULDER', 'ELBOW', 'GRIPPER'];
+    for (const joint of joints) {
+      const angle = preset.angles[joint];
+      await apiClientRef.current.sendArmCommand(joint, angle);
+    }
+
+    setTelemetry((prev) => ({
+      ...prev,
+      arm: { ...preset.angles },
+      lastCommand: `POSE:${preset.name.toUpperCase()}`,
+    }));
+
+    speakConfirmation(`Executing ${preset.label}`);
+  }, [speakConfirmation]);
+
+  // Emergency STOP
+  const handleEmergencyStop = useCallback(async () => {
+    if (autoStopTimeoutRef.current) {
+      clearTimeout(autoStopTimeoutRef.current);
+      autoStopTimeoutRef.current = null;
+    }
+
+    await apiClientRef.current.emergencyStop();
+    setTelemetry((prev) => ({
+      ...prev,
+      lastCommand: 'EMERGENCY_STOP',
+    }));
+
+    const alertMessage: ChatMessage = {
+      id: `estop-${Date.now()}`,
+      sender: 'rover',
+      text: 'EMERGENCY STOP ENGAGED. All DC motors halted.',
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      action: { type: 'ESTOP' },
+      status: 'executed',
+    };
+    setMessages((prev) => [...prev, alertMessage]);
+    speakConfirmation('Emergency stop activated');
+  }, [speakConfirmation]);
+
+  // Execute a parsed action safely
+  const executeValidatedAction = useCallback(async (action: ValidatedRobotAction) => {
+    switch (action.type) {
+      case 'ESTOP':
+        await handleEmergencyStop();
+        break;
+
+      case 'STOP':
+        await handleDriveCommand('S');
+        break;
+
+      case 'DRIVE':
+        await handleDriveCommand(action.command);
+        if (action.durationMs && action.durationMs > 0) {
+          autoStopTimeoutRef.current = setTimeout(async () => {
+            await handleDriveCommand('S');
+          }, action.durationMs);
+        }
+        break;
+
+      case 'SPEED':
+        await handleSetSpeed(action.value);
+        break;
+
+      case 'ARM':
+        await handleSetJointAngle(action.joint, action.angle);
+        break;
+
+      case 'ARM_POSE':
+        if (action.angles) {
+          for (const [j, ang] of Object.entries(action.angles)) {
+            if (ang !== undefined) {
+              await handleSetJointAngle(j as ArmJoint, ang);
+            }
+          }
+        }
+        break;
+
+      case 'STATUS_QUERY':
+        const currentData = await apiClientRef.current.fetchTelemetry();
+        setTelemetry(currentData);
+        break;
+    }
+  }, [handleEmergencyStop, handleDriveCommand, handleSetSpeed, handleSetJointAngle]);
+
+  // Natural Language Command Processing (Voice or Chat)
+  const handleProcessNaturalLanguage = useCallback(async (input: string) => {
+    if (!input.trim()) return;
+
+    const userMessage: ChatMessage = {
+      id: `user-${Date.now()}`,
+      sender: 'user',
+      text: input,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setIsAiProcessing(true);
+
+    try {
+      const parseResult = await parseWithCloudLLM(input);
+
+      if (parseResult.action) {
+        await executeValidatedAction(parseResult.action);
+      }
+
+      const roverReply: ChatMessage = {
+        id: `rover-${Date.now()}`,
+        sender: 'rover',
+        text: parseResult.replyText,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        action: parseResult.action || undefined,
+        status: parseResult.action ? 'executed' : 'rejected',
+      };
+      setMessages((prev) => [...prev, roverReply]);
+
+      // Audio speech output
+      speakConfirmation(parseResult.replyText);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Processing error';
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `err-${Date.now()}`,
+          sender: 'rover',
+          text: `Command error: ${errorMsg}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        },
+      ]);
+    } finally {
+      setIsAiProcessing(false);
+    }
+  }, [executeValidatedAction, speakConfirmation]);
+
+  // Test Ping from settings
+  const handleTestConnection = async (ip: string) => {
+    const start = performance.now();
+    try {
+      const res = await fetch(`${ip.replace(/\/+$/, '')}/api/status`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      });
+      if (res.ok) {
+        const latency = Math.round(performance.now() - start);
+        return { success: true, latencyMs: latency };
+      }
+      return { success: false, error: `ESP32 returned status ${res.status}` };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error';
+      return { success: false, error: msg };
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-cyan-500 selection:text-slate-950 font-sans">
+      {/* Top Header */}
+      <Header
+        telemetry={telemetry}
+        isSimulated={settings.isSimulated}
+        onOpenSettings={() => setSettingsModalOpen(true)}
+        onEmergencyStop={handleEmergencyStop}
+      />
+
+      {/* Prominent Simulation Banner if in Simulation Mode */}
+      {settings.isSimulated && (
+        <SimulationBanner
+          onToggleHardware={() => {
+            setSettings((prev) => ({ ...prev, isSimulated: false }));
+          }}
+        />
+      )}
+
+      {/* Main Responsive Grid Layout */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 space-y-4 sm:space-y-6">
+        {/* Top Section: Live Camera + Telemetry + Voice */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+          {/* Large Live Camera Panel (Span 7 on Desktop) */}
+          <div className="lg:col-span-7 flex flex-col gap-4">
+            <CameraPanel
+              settings={settings}
+              obstacleDistance={telemetry.obstacleDistanceCm}
+              currentSpeed={telemetry.currentSpeed}
+            />
+
+            {/* Ultrasonic Sonar & Battery Telemetry Card */}
+            <TelemetryCard telemetry={telemetry} />
+          </div>
+
+          {/* Controls & Interaction Panel (Span 5 on Desktop) */}
+          <div className="lg:col-span-5 flex flex-col gap-4">
+            {/* Drive Controller (D-Pad) */}
+            <DrivePad
+              onSendCommand={handleDriveCommand}
+              holdToDrive={settings.holdToDrive}
+            />
+
+            {/* Motor Throttle Speed Slider */}
+            <MotorSpeedControl
+              currentSpeed={telemetry.currentSpeed}
+              onSetSpeed={handleSetSpeed}
+            />
+
+            {/* Voice Controller Microphone */}
+            <VoiceController
+              onTranscriptReceived={handleProcessNaturalLanguage}
+              audioFeedbackEnabled={settings.speechAudioFeedback}
+              onToggleAudioFeedback={() =>
+                setSettings((prev) => ({
+                  ...prev,
+                  speechAudioFeedback: !prev.speechAudioFeedback,
+                }))
+              }
+            />
+          </div>
+        </div>
+
+        {/* Bottom Section: Robotic Arm + AI Chat Terminal */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+          {/* 4-DOF Robotic Arm Controller (Span 6 on Desktop) */}
+          <div className="lg:col-span-6">
+            <ArmController
+              armAngles={telemetry.arm}
+              onSetJointAngle={handleSetJointAngle}
+              onApplyPreset={handleApplyPreset}
+            />
+          </div>
+
+          {/* Natural Language AI Terminal / Chat Panel (Span 6 on Desktop) */}
+          <div className="lg:col-span-6">
+            <ChatPanel
+              messages={messages}
+              onSendMessage={handleProcessNaturalLanguage}
+              onClearMessages={() => setMessages([])}
+              isLoading={isAiProcessing}
+            />
+          </div>
+        </div>
+      </main>
+
+      {/* Settings Modal */}
+      <SettingsModal
+        isOpen={settingsModalOpen}
+        onClose={() => setSettingsModalOpen(false)}
+        settings={settings}
+        onSaveSettings={(newSettings) => setSettings(newSettings)}
+        onTestConnection={handleTestConnection}
+      />
+    </div>
+  );
+}
