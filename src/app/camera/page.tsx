@@ -107,10 +107,16 @@ export default function MobileCameraPage() {
       setMediaStream(stream);
 
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.setAttribute('playsinline', 'true');
-        videoRef.current.setAttribute('muted', 'true');
-        await videoRef.current.play();
+        const video = videoRef.current;
+        video.srcObject = stream;
+        video.muted = true;
+        try {
+          await video.play();
+        } catch (playErr: any) {
+          if (playErr.name !== 'AbortError') {
+            console.warn('Camera play warning:', playErr);
+          }
+        }
       }
 
       setCameraActive(true);
@@ -118,6 +124,10 @@ export default function MobileCameraPage() {
     } catch (err: unknown) {
       stopCamera();
       if (err instanceof DOMException) {
+        if (err.name === 'AbortError') {
+          // Benign play interruption during fast stream switches, do not surface as error
+          return;
+        }
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
           setStreamError('Camera permission denied. Please allow camera access in browser site settings.');
         } else if (err.name === 'NotFoundError') {
@@ -125,7 +135,7 @@ export default function MobileCameraPage() {
         } else if (err.name === 'NotReadableError') {
           setStreamError('Camera is currently in use by another application or tab.');
         } else {
-          setStreamError(`Camera initialization error: ${err.message}`);
+          setStreamError(`Camera error: ${err.message}`);
         }
       } else {
         setStreamError('Failed to access device camera.');
@@ -318,6 +328,9 @@ export default function MobileCameraPage() {
 
           <video
             ref={videoRef}
+            playsInline
+            muted
+            autoPlay
             className={`w-full h-full object-cover transition-opacity duration-300 ${
               cameraActive ? 'opacity-100' : 'opacity-0'
             }`}
