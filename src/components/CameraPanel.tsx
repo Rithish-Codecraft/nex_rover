@@ -87,20 +87,28 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
     }
 
     try {
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: { ideal: targetFacing },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      };
+      let stream: MediaStream;
+      try {
+        const constraints: MediaStreamConstraints = {
+          video: {
+            facingMode: { ideal: targetFacing },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        };
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch {
+        // Fallback for laptops/desktops without an environment camera
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       mediaStreamRef.current = stream;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        videoRef.current.muted = true;
+        videoRef.current.playsInline = true;
         await videoRef.current.play().catch(() => {});
       }
       setPhoneStreamActive(true);

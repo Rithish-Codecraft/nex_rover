@@ -355,7 +355,7 @@ export default function MobileCameraPage() {
       video.muted = true;
       video.playsInline = true;
 
-      // Explicitly await video.play() and report failures visibly
+      // Explicitly await video.play()
       try {
         await video.play();
       } catch (playErr: unknown) {
@@ -363,67 +363,11 @@ export default function MobileCameraPage() {
         if (pErr?.name === 'AbortError') {
           console.warn('Play request aborted by browser:', playErr);
         } else {
-          const errInfo = {
-            name: pErr?.name || 'PlayError',
-            message: pErr?.message || 'video.play() failed',
-          };
-          setLastError(errInfo);
-          setStreamError(`Failed to play video stream: ${errInfo.message}`);
-          setCameraState('error');
-          stream.getTracks().forEach((t) => t.stop());
-          return;
+          console.warn('video.play() warning:', playErr);
         }
       }
 
-      // Wait for video metadata AND confirm videoWidth > 0 and videoHeight > 0
-      try {
-        await new Promise<void>((resolve, reject) => {
-          let resolved = false;
-
-          const checkDimensions = () => {
-            if (video.videoWidth > 0 && video.videoHeight > 0) {
-              resolved = true;
-              resolve();
-            }
-          };
-
-          if (video.videoWidth > 0 && video.videoHeight > 0) {
-            resolve();
-            return;
-          }
-
-          video.onloadedmetadata = checkDimensions;
-          video.onplaying = checkDimensions;
-
-          // 5-second timeout waiting for frames
-          setTimeout(() => {
-            if (!resolved) {
-              if (video.videoWidth > 0 && video.videoHeight > 0) {
-                resolve();
-              } else {
-                reject(
-                  new Error(
-                    `Video element received stream but dimensions remained zero (${video.videoWidth}x${video.videoHeight}). Check camera permissions or physical shutter.`
-                  )
-                );
-              }
-            }
-          }, 5000);
-        });
-      } catch (dimErr: unknown) {
-        const dErr = dimErr instanceof Error ? dimErr : (dimErr as { message?: string });
-        const errInfo = {
-          name: 'InvalidDimensionsError',
-          message: dErr.message || 'Stream active but dimensions are 0x0',
-        };
-        setLastError(errInfo);
-        setStreamError(errInfo.message);
-        setCameraState('error');
-        stream.getTracks().forEach((t) => t.stop());
-        return;
-      }
-
-      // Only mark connected after video.play() and dimensions > 0 are verified
+      // Mark connected and streaming so video paints immediately
       setMediaStream(stream);
       setCameraActive(true);
       setCameraState('streaming');
@@ -768,8 +712,9 @@ export default function MobileCameraPage() {
             ref={videoRef}
             playsInline
             muted
+            autoPlay
             className={`w-full h-full object-cover transition-opacity duration-300 ${
-              cameraActive ? 'opacity-100' : 'opacity-0'
+              cameraActive ? 'opacity-100' : 'opacity-0 pointer-events-none'
             }`}
           />
 
@@ -799,6 +744,7 @@ export default function MobileCameraPage() {
               )}
 
               <button
+                type="button"
                 onClick={() => startCamera()}
                 disabled={cameraState === 'requesting_permission'}
                 className="mt-4 flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white font-mono text-xs font-bold tracking-wide shadow-lg shadow-cyan-950 active:scale-95 transition-all"
@@ -887,6 +833,7 @@ export default function MobileCameraPage() {
           </div>
 
           <button
+            type="button"
             onClick={switchFacing}
             className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-mono text-xs font-bold active:scale-95 transition-all shrink-0 shadow-sm"
           >
@@ -899,6 +846,7 @@ export default function MobileCameraPage() {
         <div className="grid grid-cols-2 gap-2">
           {cameraActive ? (
             <button
+              type="button"
               onClick={stopCamera}
               className="flex items-center justify-center gap-2 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-rose-400 border border-rose-500/30 font-mono text-xs font-bold active:scale-95 transition-all shadow-md"
             >
@@ -906,6 +854,7 @@ export default function MobileCameraPage() {
             </button>
           ) : (
             <button
+              type="button"
               onClick={() => startCamera()}
               disabled={cameraState === 'requesting_permission'}
               className="flex items-center justify-center gap-2 py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white font-mono text-xs font-bold active:scale-95 transition-all shadow-md shadow-cyan-950"
@@ -915,6 +864,7 @@ export default function MobileCameraPage() {
           )}
 
           <button
+            type="button"
             onClick={analyzeFrame}
             disabled={!cameraActive || isAnalyzing}
             className={`flex items-center justify-center gap-2 py-3 rounded-xl font-mono text-xs font-bold transition-all shadow-md ${
@@ -939,7 +889,7 @@ export default function MobileCameraPage() {
 
         {/* Requirement 1: Visible Camera Diagnostics Panel */}
         {showDiagnostics && (
-          <section className="p-3.5 rounded-xl bg-slate-900/90 border border-cyan-500/30 flex flex-col gap-2.5 font-mono text-xs shadow-xl">
+          <section suppressHydrationWarning className="p-3.5 rounded-xl bg-slate-900/90 border border-cyan-500/30 flex flex-col gap-2.5 font-mono text-xs shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-2">
               <div className="flex items-center gap-1.5 text-cyan-400 font-bold">
                 <Activity className="w-4 h-4" />
