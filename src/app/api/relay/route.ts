@@ -28,7 +28,8 @@ export async function POST(req: NextRequest) {
     }
 
     const {
-      action,
+      action: rawAction,
+      movement,
       armAction,
       speed = 130,
       durationMs = 500,
@@ -39,11 +40,12 @@ export async function POST(req: NextRequest) {
       isSimulated = false,
     } = body;
 
-    // Safety: Validate action
-    const normalizedAction = String(action || '').toUpperCase() as GeminiVisionAction;
+    // Safety: Validate action (supports direct action or movement.direction)
+    const effectiveAction = rawAction || (movement && movement.direction) || 'STOP';
+    const normalizedAction = String(effectiveAction).toUpperCase() as GeminiVisionAction;
     if (!ALLOWED_ACTIONS.has(normalizedAction)) {
       return NextResponse.json(
-        { ok: false, error: `Invalid action: ${action}. Allowed: STOP, FORWARD, BACKWARD, LEFT, RIGHT, ARM_ACTION, NO_ACTION` },
+        { ok: false, error: `Invalid action: ${effectiveAction}. Allowed: STOP, FORWARD, BACKWARD, LEFT, RIGHT, ARM_ACTION, NO_ACTION` },
         { status: 400 }
       );
     }

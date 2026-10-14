@@ -24,6 +24,7 @@ import {
   RelayCommandResult,
   RobotSettings,
   ApprovalState,
+  RoverControlMode,
 } from '@/types/robot';
 
 interface VisionAnalysisCardProps {
@@ -32,6 +33,7 @@ interface VisionAnalysisCardProps {
   settings: RobotSettings;
   onEmergencyStop: () => void;
   onExecutionFinished?: (cmd: string) => void;
+  controlMode?: RoverControlMode;
 }
 
 export const VisionAnalysisCard: React.FC<VisionAnalysisCardProps> = ({
@@ -40,6 +42,7 @@ export const VisionAnalysisCard: React.FC<VisionAnalysisCardProps> = ({
   settings,
   onEmergencyStop,
   onExecutionFinished,
+  controlMode = 'approval',
 }) => {
   const [taskPrompt, setTaskPrompt] = useState<string>(
     'Inspect path for obstacles and suggest safe rover navigation'
@@ -175,7 +178,18 @@ export const VisionAnalysisCard: React.FC<VisionAnalysisCardProps> = ({
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-cyan-400" />
           <h3 className="text-xs font-bold uppercase tracking-wider text-slate-100 flex items-center gap-1.5">
-            Gemini Vision AI <span className="text-slate-500">•</span> Operator Approval Gate
+            Gemini Vision AI <span className="text-slate-500">•</span>{' '}
+            <span
+              className={
+                controlMode === 'autonomous'
+                  ? 'text-purple-400'
+                  : controlMode === 'approval'
+                  ? 'text-amber-400'
+                  : 'text-cyan-400'
+              }
+            >
+              {controlMode === 'autonomous' ? 'Autonomous Mode' : controlMode === 'approval' ? 'Approval Gate' : 'Manual Mode'}
+            </span>
           </h3>
         </div>
 
@@ -306,14 +320,24 @@ export const VisionAnalysisCard: React.FC<VisionAnalysisCardProps> = ({
                 </span>
                 <div className="flex flex-wrap gap-1">
                   {rec.detectedObjects.length > 0 ? (
-                    rec.detectedObjects.map((obj, i) => (
-                      <span
-                        key={i}
-                        className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] border border-slate-700"
-                      >
-                        {obj}
-                      </span>
-                    ))
+                    rec.detectedObjects.map((obj, i) => {
+                      const isObj = typeof obj === 'object' && obj !== null;
+                      const label = isObj ? (obj as any).label : String(obj);
+                      const dir = isObj ? (obj as any).direction : 'front';
+                      const dist = isObj ? (obj as any).distanceEstimate : 'unknown';
+                      const conf = isObj && typeof (obj as any).confidence === 'number' ? Math.round((obj as any).confidence * 100) : null;
+                      return (
+                        <span
+                          key={i}
+                          className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] border border-slate-700 flex items-center gap-1.5"
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                          <strong className="text-white">{label}</strong>
+                          <span className="text-slate-500">({dir}{dist && dist !== 'unknown' ? ` • ${dist}` : ''})</span>
+                          {conf !== null && <span className="text-cyan-400 text-[9px] font-bold">{conf}%</span>}
+                        </span>
+                      );
+                    })
                   ) : (
                     <span className="text-[10px] text-slate-500">None detected</span>
                   )}

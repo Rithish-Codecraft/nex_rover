@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --test tests/rover-safety.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.57.0",

@@ -117,16 +117,32 @@ export interface GeminiArmAction {
   angle: number; // 0 to 180
 }
 
+export interface DetectedObject {
+  label: string;
+  direction: 'front' | 'left' | 'right' | 'rear' | 'unknown';
+  distanceEstimate: string; // "unknown" unless calibrated
+  confidence: number;       // 0 to 1
+}
+
+export interface MovementCommand {
+  direction: 'stop' | 'forward' | 'backward' | 'left' | 'right';
+  speedPercent: number;     // 0 to 100
+  durationMs: number;       // 0 to 1000
+}
+
+export type RoverControlMode = 'manual' | 'approval' | 'autonomous';
+
 export interface GeminiVisionRecommendation {
   sceneSummary: string;
-  detectedObjects: string[];
+  detectedObjects: DetectedObject[];
   hazards: string[];
-  recommendedAction: GeminiVisionAction;
-  armAction?: GeminiArmAction;
-  speed: number;        // integer from 0 to 255 (conservative default 120-150)
-  durationMs: number;   // integer from 0 to 1000 (enforced <= 1000ms)
-  confidence: number;   // number from 0 to 1
-  requiresApproval: boolean; // must be true
+  recommendedAction: string; // 'stop' | 'forward' | 'backward' | 'left' | 'right' | 'arm_action' | 'no_action' | GeminiVisionAction
+  movement?: MovementCommand;
+  armAction?: GeminiArmAction | null;
+  speed: number;        // integer from 0 to 255 (PWM value)
+  durationMs: number;   // integer from 0 to 1000 (strictly enforced <= 1000ms)
+  confidence: number;   // 0 to 1
+  requiresApproval: boolean; // must be true in approval mode
   reason: string;
 }
 
@@ -146,6 +162,14 @@ export interface CapturedFrame {
   timestamp: string;
 }
 
+export interface PhoneCameraSnapshot {
+  dataUrl: string;
+  timestamp: number;
+  width: number;
+  height: number;
+  facingMode?: string;
+}
+
 export type ApprovalState =
   | 'idle'
   | 'analyzing'
@@ -160,5 +184,22 @@ export interface RelayCommandResult {
   commandSent?: string;
   esp32Status?: Record<string, unknown>;
   error?: string;
-  acknowledgedBy?: 'pc-backend' | 'esp32-direct' | 'simulation';
+  acknowledgedBy?: 'pc-backend' | 'esp32-direct' | 'simulation' | 'usb-serial';
+}
+
+export interface SerialPortInfo {
+  device: string;
+  description: string;
+  hwid?: string;
+}
+
+export interface SerialBridgeStatus {
+  connected: boolean;
+  port: string | null;
+  baudrate: number;
+  mode: 'serial' | 'esp32' | 'simulation';
+  lastAck: string | null;
+  lastError: string | null;
+  obstacleDistanceCm: number | null;
+  commandWatchdogActive: boolean;
 }

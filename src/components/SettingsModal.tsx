@@ -41,7 +41,74 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     message?: string;
   }>({ status: 'idle' });
 
+  // USB Serial Controller State
+  const [availablePorts, setAvailablePorts] = useState<Array<{ device: string; description: string }>>([]);
+  const [selectedPort, setSelectedPort] = useState<string>('COM14');
+  const [selectedBaud, setSelectedBaud] = useState<number>(115200);
+  const [serialStatus, setSerialStatus] = useState<string | null>(null);
+  const [isScanningPorts, setIsScanningPorts] = useState<boolean>(false);
+
   if (!isOpen) return null;
+
+  const handleScanPorts = async () => {
+    setIsScanningPorts(true);
+    try {
+      const url = `${formData.pcBackendUrl.replace(/\/+$/, '')}/api/ports`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        setAvailablePorts(data.ports || []);
+        if (data.ports?.length > 0 && !selectedPort) {
+          setSelectedPort(data.ports[0].device);
+        }
+        setSerialStatus(`Found ${data.ports?.length || 0} serial device(s).`);
+      } else {
+        setSerialStatus('Failed to scan ports (PC Backend error).');
+      }
+    } catch {
+      setSerialStatus('PC Backend unreachable at ' + formData.pcBackendUrl);
+    } finally {
+      setIsScanningPorts(false);
+    }
+  };
+
+  const handleConnectSerial = async () => {
+    try {
+      const url = `${formData.pcBackendUrl.replace(/\/+$/, '')}/api/serial/connect`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Rover-Token': formData.roverToken,
+        },
+        body: JSON.stringify({ port: selectedPort, baudrate: selectedBaud }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setSerialStatus(`Connected to ${selectedPort} (${selectedBaud} baud)`);
+      } else {
+        setSerialStatus(`Connection failed: ${data.error}`);
+      }
+    } catch (e: any) {
+      setSerialStatus(`Error: ${e.message}`);
+    }
+  };
+
+  const handleDisconnectSerial = async () => {
+    try {
+      const url = `${formData.pcBackendUrl.replace(/\/+$/, '')}/api/serial/disconnect`;
+      await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Rover-Token': formData.roverToken,
+        },
+      });
+      setSerialStatus('Disconnected from serial hardware.');
+    } catch (e: any) {
+      setSerialStatus(`Error: ${e.message}`);
+    }
+  };
 
   const handleTest = async () => {
     setTestResult({ status: 'testing' });
@@ -255,6 +322,87 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 placeholder="Matches ROVER_TOKEN in pc_backend/.env"
                 className="w-full bg-slate-950 border border-slate-800 focus:border-cyan-400 px-3 py-1.5 rounded-lg text-slate-100 font-mono text-xs focus:outline-none"
               />
+            </div>
+
+            {/* USB Serial Hardware Port Controls */}
+            <div className="pt-2 border-t border-slate-800/80">
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-slate-300 font-semibold text-[11px] flex items-center gap-1">
+                  <Radio className="w-3 h-3 text-cyan-400" />
+                  USB Serial Hardware (Arduino UNO):
+                </label>
+                <button
+                  type="button"
+                  onClick={handleScanPorts}
+                  disabled={isScanningPorts}
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[10px] border border-slate-700"
+                >
+                  {isScanningPorts ? 'Scanning...' : 'Scan Ports'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 mt-1">
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-0.5">Port (e.g. COM14):</span>
+                  {availablePorts.length > 0 ? (
+                    <select
+                      value={selectedPort}
+                      onChange={(e) => setSelectedPort(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 px-2 py-1 rounded text-slate-200 text-xs font-mono"
+                    >
+                      {availablePorts.map((p) => (
+                        <option key={p.device} value={p.device}>
+                          {p.device} ({p.description})
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={selectedPort}
+                      onChange={(e) => setSelectedPort(e.target.value)}
+                      placeholder="COM14"
+                      className="w-full bg-slate-950 border border-slate-800 px-2 py-1 rounded text-slate-200 text-xs font-mono"
+                    />
+                  )}
+                </div>
+
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-0.5">Baud Rate:</span>
+                  <select
+                    value={selectedBaud}
+                    onChange={(e) => setSelectedBaud(Number(e.target.value))}
+                    className="w-full bg-slate-950 border border-slate-800 px-2 py-1 rounded text-slate-200 text-xs font-mono"
+                  >
+                    <option value={115200}>115200 (Default UNO V2)</option>
+                    <option value={9600}>9600 (Legacy)</option>
+                    <option value={57600}>57600</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={handleConnectSerial}
+                  className="flex-1 py-1 rounded bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold"
+                >
+                  Connect Serial
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDisconnectSerial}
+                  className="flex-1 py-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-700 text-[11px]"
+                >
+                  Disconnect
+                </button>
+              </div>
+
+              {serialStatus && (
+                <p className="text-[10px] font-mono text-cyan-300 mt-1.5 bg-slate-950/80 p-1.5 rounded border border-slate-800">
+                  {serialStatus}
+                </p>
+              )}
             </div>
           </div>
 

@@ -23,12 +23,16 @@ import {
   ValidatedRobotAction,
   DEFAULT_ARM_ANGLES,
   CapturedFrame,
+  RoverControlMode,
 } from '@/types/robot';
 import { RobotApiClient } from '@/lib/robot-api';
 import { parseWithCloudLLM } from '@/lib/ai-command-parser';
 import { SpeechHandler } from '@/lib/speech';
 
 export default function RoverDashboardPage() {
+  // Control Arbitration Mode: 'manual' | 'approval' | 'autonomous'
+  const [controlMode, setControlMode] = useState<RoverControlMode>('approval');
+
   // Settings State - defaults to Simulation Mode first so judges/users can test immediately!
   const [settings, setSettings] = useState<RobotSettings>({
     robotIp: 'http://192.168.4.1',
@@ -106,20 +110,112 @@ export default function RoverDashboardPage() {
     return () => clearInterval(interval);
   }, [settings.pollIntervalMs, settings.isSimulated]);
 
-  // Drive Command Execution
-  const handleDriveCommand = useCallback(async (command: DriveCommand) => {
-    // Clear any previous timed movement
+  // Emergency STOP (Interrupts all movements immediately, clears queues)
+  const handleEmergencyStop = useCallback(async () => {
     if (autoStopTimeoutRef.current) {
       clearTimeout(autoStopTimeoutRef.current);
       autoStopTimeoutRef.current = null;
     }
 
-    await apiClientRef.current.sendDriveCommand(command);
+    await apiClientRef.current.emergencyStop();
     setTelemetry((prev) => ({
       ...prev,
-      lastCommand: command,
+      lastCommand: 'EMERGENCY_STOP',
     }));
-  }, []);
+
+    const alertMessage: ChatMessage = {
+      id: `estop-${Date.now()}`,
+      sender: 'rover',
+      text: 'EMERGENCY STOP ENGAGED. All DC motors halted immediately.',
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      action: { type: 'ESTOP' },
+      status: 'executed',
+    };
+    setMessages((prev) => [...prev, alertMessage]);
+    speakConfirmation('Emergency stop activated');
+  }, [speakConfirmation]);
+
+  // Central Safety Command Arbiter enforcing strict priority hierarchy:
+  // 1. Emergency Stop (Highest priority: always executed, cancels all queues)
+  // 2. Manual Operator Control (Overrides AI/autonomous commands)
+  // 3. Safety Restrictions & Obstacle Detection (Forward drive blocked if sonar < 20cm)
+  // 4. Approved AI / Autonomous commands (max 1000ms duration, clamped speed)
+  const arbitrateAndDrive = useCallback(
+    async (
+      command: DriveCommand,
+      source: 'manual' | 'ai' | 'estop' = 'manual',
+      durationMs?: number
+    ) => {
+      if (source === 'estop' || command === 'S') {
+        if (autoStopTimeoutRef.current) {
+          clearTimeout(autoStopTimeoutRef.current);
+          autoStopTimeoutRef.current = null;
+        }
+        await apiClientRef.current.sendDriveCommand('S');
+        setTelemetry((prev) => ({ ...prev, lastCommand: 'S' }));
+        return { executed: true };
+      }
+
+      // Safety Guard: Obstacle Collision Prevention (< 20cm blocks forward movement)
+      if (
+        command === 'F' &&
+        telemetry.obstacleDistanceCm !== null &&
+        telemetry.obstacleDistanceCm > 0 &&
+        telemetry.obstacleDistanceCm < 20
+      ) {
+        speakConfirmation('Obstacle detected. Forward motion blocked.');
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `safety-${Date.now()}`,
+            sender: 'rover',
+            text: `SAFETY INTERLOCK: Forward motion blocked. Obstacle at ${telemetry.obstacleDistanceCm} cm.`,
+            timestamp: new Date().toLocaleTimeString(),
+          },
+        ]);
+        await apiClientRef.current.sendDriveCommand('S');
+        return { executed: false, reason: 'Obstacle collision prevention' };
+      }
+
+      // Revert from autonomous to manual on human operator keypress/click
+      if (source === 'manual' && controlMode === 'autonomous') {
+        setControlMode('manual');
+        speakConfirmation('Manual override engaged');
+      }
+
+      // Clear any previous timed movement
+      if (autoStopTimeoutRef.current) {
+        clearTimeout(autoStopTimeoutRef.current);
+        autoStopTimeoutRef.current = null;
+      }
+
+      await apiClientRef.current.sendDriveCommand(command);
+      setTelemetry((prev) => ({
+        ...prev,
+        lastCommand: command,
+      }));
+
+      // Enforce bounded duration (strictly <= 1000ms)
+      if (durationMs && durationMs > 0) {
+        const boundedDuration = Math.min(1000, durationMs);
+        autoStopTimeoutRef.current = setTimeout(async () => {
+          await apiClientRef.current.sendDriveCommand('S');
+          setTelemetry((prev) => ({ ...prev, lastCommand: 'S' }));
+        }, boundedDuration);
+      }
+
+      return { executed: true };
+    },
+    [controlMode, speakConfirmation, telemetry.obstacleDistanceCm]
+  );
+
+  // Drive Command Execution via Arbiter
+  const handleDriveCommand = useCallback(
+    async (command: DriveCommand, durationMs?: number) => {
+      await arbitrateAndDrive(command, 'manual', durationMs);
+    },
+    [arbitrateAndDrive]
+  );
 
   // Speed Command Execution
   const handleSetSpeed = useCallback(async (speed: number) => {
@@ -160,31 +256,6 @@ export default function RoverDashboardPage() {
     }));
 
     speakConfirmation(`Executing ${preset.label}`);
-  }, [speakConfirmation]);
-
-  // Emergency STOP (Interrupts all movements immediately)
-  const handleEmergencyStop = useCallback(async () => {
-    if (autoStopTimeoutRef.current) {
-      clearTimeout(autoStopTimeoutRef.current);
-      autoStopTimeoutRef.current = null;
-    }
-
-    await apiClientRef.current.emergencyStop();
-    setTelemetry((prev) => ({
-      ...prev,
-      lastCommand: 'EMERGENCY_STOP',
-    }));
-
-    const alertMessage: ChatMessage = {
-      id: `estop-${Date.now()}`,
-      sender: 'rover',
-      text: 'EMERGENCY STOP ENGAGED. All DC motors halted immediately.',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      action: { type: 'ESTOP' },
-      status: 'executed',
-    };
-    setMessages((prev) => [...prev, alertMessage]);
-    speakConfirmation('Emergency stop activated');
   }, [speakConfirmation]);
 
   // Execute a parsed action safely
@@ -335,6 +406,81 @@ export default function RoverDashboardPage() {
 
       {/* Main Responsive Grid Layout */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 space-y-4 sm:space-y-6">
+        {/* Tactical Control Arbitration Mode Bar */}
+        <div className="flex flex-col sm:flex-row items-center justify-between p-3 rounded-xl bg-slate-900/80 border border-slate-800 gap-3 shadow-lg">
+          <div className="flex items-center gap-2">
+            <span
+              className={`w-2.5 h-2.5 rounded-full ${
+                controlMode === 'autonomous'
+                  ? 'bg-purple-400 animate-ping'
+                  : controlMode === 'approval'
+                  ? 'bg-amber-400 animate-pulse'
+                  : 'bg-cyan-400'
+              }`}
+            />
+            <span className="text-xs font-mono font-bold text-slate-300 uppercase tracking-wide">
+              Control Priority Arbiter:
+            </span>
+            <span
+              className={`text-xs font-mono px-2.5 py-0.5 rounded border font-bold uppercase ${
+                controlMode === 'autonomous'
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                  : controlMode === 'approval'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+              }`}
+            >
+              {controlMode === 'manual'
+                ? 'Manual Mode (100% Operator Priority)'
+                : controlMode === 'approval'
+                ? 'Approval Gate (Human Authorization Required)'
+                : 'Autonomous Exploration (Safety Gated)'}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 p-1 rounded-lg bg-slate-950 border border-slate-800">
+            <button
+              onClick={() => {
+                setControlMode('manual');
+                speakConfirmation('Switched to manual control mode');
+              }}
+              className={`px-3 py-1 rounded text-xs font-mono font-bold transition-all ${
+                controlMode === 'manual'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Manual
+            </button>
+            <button
+              onClick={() => {
+                setControlMode('approval');
+                speakConfirmation('Switched to operator approval mode');
+              }}
+              className={`px-3 py-1 rounded text-xs font-mono font-bold transition-all ${
+                controlMode === 'approval'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Approval Gate
+            </button>
+            <button
+              onClick={() => {
+                setControlMode('autonomous');
+                speakConfirmation('Switched to autonomous exploration mode');
+              }}
+              className={`px-3 py-1 rounded text-xs font-mono font-bold transition-all ${
+                controlMode === 'autonomous'
+                  ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Autonomous
+            </button>
+          </div>
+        </div>
+
         {/* Top Section: Live Camera + Vision Card + Telemetry + Controls */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
           {/* Left Column: Camera Viewport + Gemini Vision Approval Card + Telemetry (Span 7) */}
@@ -354,6 +500,7 @@ export default function RoverDashboardPage() {
               settings={settings}
               onEmergencyStop={handleEmergencyStop}
               onExecutionFinished={handleVisionExecutionFinished}
+              controlMode={controlMode}
             />
 
             {/* Ultrasonic Sonar & Battery Telemetry Card */}

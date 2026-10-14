@@ -2,40 +2,57 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Video,
+  Camera,
+  RefreshCw,
   VideoOff,
+  Layers,
+  AlertTriangle,
   Smartphone,
   Wifi,
-  RefreshCw,
-  AlertTriangle,
-  Camera,
-  Layers,
-  ShieldAlert,
-  Sparkles,
-  Check,
   SwitchCamera,
+  ShieldAlert,
+  Check,
+  Radio,
+  ExternalLink,
 } from 'lucide-react';
-import { RobotSettings, CapturedFrame } from '@/types/robot';
+import { CapturedFrame, PhoneCameraSnapshot, RobotSettings } from '@/types/robot';
 
 interface CameraPanelProps {
-  settings: RobotSettings;
-  obstacleDistance: number | null;
-  currentSpeed: number;
-  capturedFrame?: CapturedFrame | null;
+  streamUrl?: string;
+  settings?: RobotSettings;
+  isSimulated?: boolean;
   onFrameCaptured?: (frame: CapturedFrame) => void;
+  capturedFrame?: CapturedFrame | null;
+  obstacleDistance?: number | null;
+  currentSpeed?: number;
 }
 
 export const CameraPanel: React.FC<CameraPanelProps> = ({
+  streamUrl,
   settings,
-  obstacleDistance,
-  currentSpeed,
-  capturedFrame,
+  isSimulated,
   onFrameCaptured,
+  capturedFrame,
+  obstacleDistance = null,
+  currentSpeed = 160,
 }) => {
-  const [activeSource, setActiveSource] = useState<'esp32' | 'phone'>('esp32');
+  const effectiveStreamUrl = streamUrl || settings?.cameraStreamUrl || 'http://192.168.4.1:81/stream';
+  const effectiveIsSimulated = isSimulated ?? (settings?.isSimulated || false);
+  // Source: 'remote-phone' (relayed from rover phone at /camera), 'local-device', or 'esp32'
+  const [activeSource, setActiveSource] = useState<'remote-phone' | 'local-device' | 'esp32'>('remote-phone');
+
+  // Local Device Camera State
   const [phoneStreamActive, setPhoneStreamActive] = useState<boolean>(false);
-  const [phoneStreamError, setPhoneStreamError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
+  const [phoneStreamError, setPhoneStreamError] = useState<string | null>(null);
+
+  // Remote Phone Relay State (From /api/camera/stream)
+  const [remoteSnapshot, setRemoteSnapshot] = useState<PhoneCameraSnapshot | null>(null);
+  const [remoteAgeMs, setRemoteAgeMs] = useState<number | null>(null);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [isRemotePolling, setIsRemotePolling] = useState<boolean>(true);
+
+  // ESP32 Stream State
   const [espStreamKey, setEspStreamKey] = useState<number>(0);
   const [espImgError, setEspImgError] = useState<boolean>(false);
   const [hudVisible, setHudVisible] = useState<boolean>(true);
@@ -45,12 +62,10 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
-  // Stop phone camera tracks cleanly
-  const stopPhoneCamera = () => {
+  // Clean up local camera tracks cleanly
+  const stopLocalCamera = () => {
     if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => {
-        track.stop();
-      });
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
     }
     if (videoRef.current) {
@@ -59,19 +74,15 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
     setPhoneStreamActive(false);
   };
 
-  // Start smartphone camera preview using getUserMedia with specified facingMode
-  const startPhoneCamera = async (targetFacing: 'environment' | 'user' = facingMode) => {
+  // Start local camera
+  const startLocalCamera = async (targetFacing: 'environment' | 'user' = facingMode) => {
     setPhoneStreamError(null);
-
     if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setPhoneStreamError(
-        'MediaDevices API is unsupported or blocked by an insecure context (HTTP). Please run over HTTPS or localhost.'
-      );
+      setPhoneStreamError('MediaDevices API is unsupported or requires HTTPS.');
       return;
     }
 
     try {
-      // First try with ideal facing mode
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: { ideal: targetFacing },
@@ -90,11 +101,11 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
       }
       setPhoneStreamActive(true);
     } catch (err: unknown) {
-      stopPhoneCamera();
+      stopLocalCamera();
       if (err instanceof DOMException) {
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          setPhoneStreamError('Camera permission was denied. Allow camera access in browser site settings.');
-        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          setPhoneStreamError('Camera permission was denied in browser site settings.');
+        } else if (err.name === 'NotFoundError') {
           setPhoneStreamError(`No physical ${targetFacing === 'environment' ? 'rear' : 'front'} camera detected.`);
         } else if (err.name === 'NotReadableError') {
           setPhoneStreamError('Camera is already in use by another application.');
@@ -102,29 +113,63 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
           setPhoneStreamError(`Camera error: ${err.message}`);
         }
       } else {
-        setPhoneStreamError('Failed to initialize device camera.');
+        setPhoneStreamError('Failed to initialize local camera.');
       }
     }
   };
 
-  // Switch between Rear (environment) and Front (user / selfie) camera
   const switchCameraFacing = async () => {
     const nextFacing = facingMode === 'environment' ? 'user' : 'environment';
     setFacingMode(nextFacing);
-
     if (phoneStreamActive) {
-      stopPhoneCamera();
-      // Brief delay to allow mobile camera hardware to release before reopening
-      setTimeout(() => {
-        startPhoneCamera(nextFacing);
-      }, 150);
+      stopLocalCamera();
+      setTimeout(() => startLocalCamera(nextFacing), 150);
     }
   };
 
-  // Clean up streams when component unmounts
+  // Remote Phone Relay Polling Loop (/api/camera/stream)
+  useEffect(() => {
+    if (activeSource !== 'remote-phone' || !isRemotePolling) return;
+
+    let isMounted = true;
+    const fetchRemoteFrame = async () => {
+      try {
+        const res = await fetch('/api/camera/stream');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        if (isMounted) {
+          if (data.ok && data.hasFrame && data.snapshot) {
+            setRemoteSnapshot(data.snapshot);
+            setRemoteAgeMs(data.ageMs || 0);
+            setRemoteError(null);
+          } else {
+            setRemoteAgeMs(data.ageMs || null);
+            if (data.isStale) {
+              setRemoteError('Phone camera feed is stale (>10s). Check /camera on mobile.');
+            }
+          }
+        }
+      } catch (err: unknown) {
+        if (isMounted) {
+          setRemoteError('Failed to fetch remote mobile frame.');
+        }
+      }
+    };
+
+    fetchRemoteFrame();
+    const interval = setInterval(fetchRemoteFrame, 800); // 800ms poll for live snapshot preview
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [activeSource, isRemotePolling]);
+
+  // Clean up streams when unmounted
   useEffect(() => {
     return () => {
-      stopPhoneCamera();
+      stopLocalCamera();
     };
   }, []);
 
@@ -135,6 +180,25 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
 
   // Capture frame from active camera into offscreen canvas
   const handleCaptureFrame = () => {
+    // If remote phone stream is active, capture from remote snapshot
+    if (activeSource === 'remote-phone') {
+      if (!remoteSnapshot?.dataUrl) return;
+      setShutterFlash(true);
+      setTimeout(() => setShutterFlash(false), 200);
+
+      const frame: CapturedFrame = {
+        dataUrl: remoteSnapshot.dataUrl,
+        width: remoteSnapshot.width || 1280,
+        height: remoteSnapshot.height || 720,
+        timestamp: new Date().toLocaleTimeString(),
+      };
+      if (onFrameCaptured) {
+        onFrameCaptured(frame);
+      }
+      return;
+    }
+
+    // Otherwise capture from local video element
     if (!videoRef.current || !canvasRef.current) return;
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -158,7 +222,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
       dataUrl,
       width,
       height,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      timestamp: new Date().toLocaleTimeString(),
     };
 
     if (onFrameCaptured) {
@@ -168,7 +232,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
 
   return (
     <div className="relative flex flex-col w-full rounded-xl bg-slate-950/90 border border-cyan-500/30 overflow-hidden shadow-2xl">
-      {/* Hidden offscreen canvas for frame capture */}
+      {/* Hidden offscreen canvas for local frame capture */}
       <canvas ref={canvasRef} className="hidden" />
 
       {/* Viewport Top Header & Controls */}
@@ -177,7 +241,39 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
         <div className="flex items-center gap-1 p-0.5 bg-slate-950 rounded-lg border border-slate-800">
           <button
             onClick={() => {
+              setActiveSource('remote-phone');
+              stopLocalCamera();
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] font-medium transition-all ${
+              activeSource === 'remote-phone'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            title="Live video feed relayed from mobile phone mounted on rover"
+          >
+            <Radio className="w-3.5 h-3.5" />
+            <span>Rover Phone Cam {remoteSnapshot && '•'}</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveSource('local-device');
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] font-medium transition-all ${
+              activeSource === 'local-device'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            title="Local camera on this device"
+          >
+            <Smartphone className="w-3.5 h-3.5" />
+            <span>Local Cam {phoneStreamActive && '•'}</span>
+          </button>
+
+          <button
+            onClick={() => {
               setActiveSource('esp32');
+              stopLocalCamera();
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] font-medium transition-all ${
               activeSource === 'esp32'
@@ -186,28 +282,13 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
             }`}
           >
             <Wifi className="w-3.5 h-3.5" />
-            <span>ESP32-CAM</span>
-          </button>
-
-          <button
-            onClick={() => {
-              setActiveSource('phone');
-            }}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] font-medium transition-all ${
-              activeSource === 'phone'
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Smartphone className="w-3.5 h-3.5" />
-            <span>Phone Cam {phoneStreamActive && '•'}</span>
+            <span>ESP32 Stream</span>
           </button>
         </div>
 
-        {/* Viewport Utilities & Camera Switcher */}
+        {/* Viewport Utilities */}
         <div className="flex items-center gap-1.5">
-          {/* Camera Flip / Switcher Button (Enabled on Phone Cam) */}
-          {activeSource === 'phone' && (
+          {activeSource === 'local-device' && (
             <button
               onClick={switchCameraFacing}
               title={`Switch camera (Currently: ${facingMode === 'environment' ? 'Rear Lens' : 'Front Lens'})`}
@@ -230,7 +311,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
             <Layers className="w-3.5 h-3.5" />
           </button>
 
-          {activeSource === 'esp32' ? (
+          {activeSource === 'esp32' && (
             <button
               onClick={refreshEspStream}
               title="Refresh ESP32 Stream"
@@ -238,9 +319,11 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
             >
               <RefreshCw className="w-3.5 h-3.5" />
             </button>
-          ) : (
+          )}
+
+          {activeSource === 'local-device' && (
             <button
-              onClick={() => (phoneStreamActive ? stopPhoneCamera() : startPhoneCamera())}
+              onClick={() => (phoneStreamActive ? stopLocalCamera() : startLocalCamera())}
               className={`flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-mono font-medium transition-colors ${
                 phoneStreamActive
                   ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
@@ -262,71 +345,58 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
       </div>
 
       {/* Main Video Viewport */}
-      <div className="relative w-full aspect-video sm:aspect-[16/10] bg-slate-950 flex items-center justify-center overflow-hidden">
+      <div className="relative aspect-[16/9] w-full bg-black overflow-hidden flex items-center justify-center">
         {/* Shutter Flash Animation */}
         {shutterFlash && (
-          <div className="absolute inset-0 bg-white/70 z-30 pointer-events-none transition-opacity duration-150" />
+          <div className="absolute inset-0 bg-white z-30 opacity-70 pointer-events-none transition-opacity duration-150" />
         )}
 
-        {/* Source 1: ESP32-CAM */}
-        {activeSource === 'esp32' && (
-          <div className="relative w-full h-full flex items-center justify-center bg-black">
-            {!settings.isSimulated && !espImgError ? (
-              /* eslint-disable-next-line @next/next/no-img-element */
+        {/* View 1: Remote Rover Phone Camera (Relayed via /api/camera/stream) */}
+        {activeSource === 'remote-phone' && (
+          <div className="relative w-full h-full flex items-center justify-center bg-slate-950">
+            {remoteSnapshot ? (
               <img
-                key={espStreamKey}
-                src={`${settings.cameraStreamUrl}?t=${espStreamKey}`}
-                alt="ESP32-CAM Live Video Stream"
+                src={remoteSnapshot.dataUrl}
+                alt="Rover Mobile Camera Feed"
                 className="w-full h-full object-contain"
-                onError={() => setEspImgError(true)}
               />
             ) : (
-              /* Simulated / Hardware Standby View */
               <div className="flex flex-col items-center justify-center p-6 text-center max-w-md">
-                <div className="w-14 h-14 rounded-full bg-cyan-950/60 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-3 shadow-inner">
-                  <Video className="w-7 h-7 animate-pulse" />
+                <div className="w-14 h-14 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400 mb-3">
+                  <Radio className="w-7 h-7 text-cyan-400 animate-pulse" />
                 </div>
-                <h4 className="text-sm font-bold text-slate-200 font-mono tracking-wide uppercase">
-                  {settings.isSimulated
-                    ? 'ESP32 Stream: Simulation Mode'
-                    : 'ESP32-CAM Stream Standby'}
+                <h4 className="text-sm font-bold text-slate-200 font-mono tracking-wide">
+                  Waiting for Mobile Camera Broadcast
                 </h4>
                 <p className="text-xs text-slate-400 mt-1 font-mono">
-                  {settings.isSimulated
-                    ? 'Switch to "Phone Cam" tab to capture frames with your device camera for Gemini Vision!'
-                    : `Connecting to ${settings.cameraStreamUrl}. Verify ESP32-CAM power, Wi-Fi connection, and IP.`}
+                  Open the dedicated camera broadcaster on your phone mounted on the rover chassis.
                 </p>
-                <div className="flex gap-2 mt-4">
-                  <button
-                    onClick={refreshEspStream}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300"
+                <div className="mt-4 flex items-center gap-2">
+                  <a
+                    href="/camera"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-mono font-bold shadow-md shadow-cyan-950 transition-all"
                   >
-                    <RefreshCw className="w-3.5 h-3.5" /> Retry Stream
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveSource('phone');
-                      startPhoneCamera();
-                    }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-xs font-mono text-cyan-200"
-                  >
-                    <Smartphone className="w-3.5 h-3.5" /> Use Phone Cam
-                  </button>
+                    <span>Open /camera page</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
                 </div>
               </div>
             )}
           </div>
         )}
 
-        {/* Source 2: Phone Camera (Switchable between Rear & Front) */}
-        {activeSource === 'phone' && (
-          <div className="relative w-full h-full flex items-center justify-center bg-black">
+        {/* View 2: Local Device Camera */}
+        {activeSource === 'local-device' && (
+          <div className="relative w-full h-full flex items-center justify-center bg-slate-950">
             <video
               ref={videoRef}
-              autoPlay
               playsInline
               muted
-              className={`w-full h-full object-cover ${!phoneStreamActive ? 'hidden' : ''}`}
+              className={`w-full h-full object-cover transition-opacity duration-300 ${
+                phoneStreamActive ? 'opacity-100' : 'opacity-0 absolute'
+              }`}
             />
 
             {!phoneStreamActive && (
@@ -335,10 +405,10 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
                   <Camera className="w-7 h-7" />
                 </div>
                 <h4 className="text-sm font-bold text-slate-200 font-mono tracking-wide">
-                  Device Camera ({facingMode === 'environment' ? 'Rear Lens' : 'Front Lens'})
+                  Local Device Camera ({facingMode === 'environment' ? 'Rear Lens' : 'Front Lens'})
                 </h4>
                 <p className="text-xs text-slate-400 mt-1 font-mono">
-                  Use your phone or laptop camera for Gemini AI vision and live navigation.
+                  Use your local laptop or attached webcam for direct vision analysis.
                 </p>
 
                 {phoneStreamError && (
@@ -350,7 +420,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
 
                 <div className="flex items-center justify-center gap-2 mt-4">
                   <button
-                    onClick={() => startPhoneCamera()}
+                    onClick={() => startLocalCamera()}
                     className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-mono font-bold tracking-wide shadow-md shadow-cyan-950 active:scale-95 transition-all"
                   >
                     <Camera className="w-4 h-4" /> Start {facingMode === 'environment' ? 'Rear' : 'Front'} Cam
@@ -369,6 +439,49 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
           </div>
         )}
 
+        {/* View 3: ESP32-CAM MJPEG Stream */}
+        {activeSource === 'esp32' && (
+          <div className="relative w-full h-full flex items-center justify-center">
+            {effectiveIsSimulated ? (
+              <div className="relative w-full h-full flex flex-col items-center justify-center bg-gradient-to-b from-slate-900 to-black text-slate-400 p-6 text-center select-none">
+                <div className="w-12 h-12 rounded-full bg-cyan-950/40 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-2">
+                  <Wifi className="w-6 h-6 animate-pulse" />
+                </div>
+                <h4 className="text-sm font-bold font-mono text-cyan-300 tracking-wide">
+                  ESP32 Stream (Simulation Mode)
+                </h4>
+                <p className="text-xs text-slate-500 mt-1 font-mono">
+                  Simulation mode active. Switch to Rover Phone Cam or connect physical hardware.
+                </p>
+              </div>
+            ) : !espImgError ? (
+              <img
+                key={espStreamKey}
+                src={effectiveStreamUrl}
+                alt="ESP32 Stream"
+                className="w-full h-full object-cover"
+                onError={() => setEspImgError(true)}
+              />
+            ) : (
+              <div className="flex flex-col items-center justify-center p-6 text-center max-w-sm">
+                <div className="w-12 h-12 rounded-full bg-rose-950/50 border border-rose-500/30 flex items-center justify-center text-rose-400 mb-2">
+                  <AlertTriangle className="w-6 h-6" />
+                </div>
+                <h4 className="text-sm font-bold text-slate-200 font-mono">ESP32 Feed Offline</h4>
+                <p className="text-xs text-slate-400 mt-1 font-mono">
+                  Could not reach {streamUrl}. Check Wi-Fi connection or switch to Rover Phone Cam.
+                </p>
+                <button
+                  onClick={refreshEspStream}
+                  className="mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-mono text-cyan-300 border border-slate-700"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Reconnect
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Tactical HUD Overlay */}
         {hudVisible && (
           <div className="absolute inset-0 pointer-events-none p-3 flex flex-col justify-between">
@@ -377,7 +490,12 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
               <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/60 backdrop-blur-sm border border-cyan-500/30 text-[10px] font-mono text-cyan-300">
                 <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
                 <span>
-                  SOURCE: {activeSource === 'esp32' ? 'ESP32-CAM' : `DEVICE-${facingMode.toUpperCase()}`}
+                  SOURCE:{' '}
+                  {activeSource === 'remote-phone'
+                    ? 'ROVER-PHONE-RELAY'
+                    : activeSource === 'local-device'
+                    ? `LOCAL-${facingMode.toUpperCase()}`
+                    : 'ESP32-STREAM'}
                 </span>
               </div>
 
@@ -395,7 +513,7 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
               )}
             </div>
 
-            {/* Center Reticle / Crosshair */}
+            {/* Center Crosshair */}
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="relative w-24 h-24 border border-cyan-400/20 rounded-full flex items-center justify-center">
                 <div className="w-2 h-2 rounded-full bg-cyan-400/40" />
@@ -411,28 +529,35 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
               <span className="px-2 py-0.5 rounded bg-black/60 backdrop-blur-sm border border-slate-800">
                 THROTTLE: {currentSpeed}/255
               </span>
-              <span className="px-2 py-0.5 rounded bg-black/60 backdrop-blur-sm border border-slate-800">
-                LENS: {facingMode === 'environment' ? 'BACK/REAR' : 'FRONT/USER'}
-              </span>
+              {activeSource === 'remote-phone' && remoteAgeMs !== null && (
+                <span className="px-2 py-0.5 rounded bg-black/60 backdrop-blur-sm border border-slate-800">
+                  LATENCY: {remoteAgeMs}ms
+                </span>
+              )}
+              {activeSource === 'local-device' && (
+                <span className="px-2 py-0.5 rounded bg-black/60 backdrop-blur-sm border border-slate-800">
+                  LENS: {facingMode === 'environment' ? 'BACK/REAR' : 'FRONT/USER'}
+                </span>
+              )}
             </div>
           </div>
         )}
       </div>
 
-      {/* Frame Capture Action Bar (Visible when Phone Camera is Active) */}
-      {activeSource === 'phone' && phoneStreamActive && (
-        <div className="px-3 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleCaptureFrame}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-mono text-xs font-bold shadow-md shadow-cyan-950 active:scale-95 transition-all"
-            >
-              <Camera className="w-3.5 h-3.5" />
-              <span>Capture Frame</span>
-            </button>
+      {/* Frame Capture Action Bar */}
+      <div className="px-3 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleCaptureFrame}
+            disabled={activeSource === 'remote-phone' ? !remoteSnapshot : !phoneStreamActive && activeSource !== 'esp32'}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-mono text-xs font-bold shadow-md shadow-cyan-950 active:scale-95 transition-all"
+          >
+            <Camera className="w-3.5 h-3.5" />
+            <span>Capture Frame for Gemini</span>
+          </button>
 
-            {/* Switch Camera Button in Active Toolbar */}
+          {activeSource === 'local-device' && phoneStreamActive && (
             <button
               type="button"
               onClick={switchCameraFacing}
@@ -442,20 +567,24 @@ export const CameraPanel: React.FC<CameraPanelProps> = ({
               <SwitchCamera className="w-3.5 h-3.5 text-cyan-400" />
               <span>Flip ({facingMode === 'environment' ? 'Rear' : 'Front'})</span>
             </button>
+          )}
 
-            {capturedFrame && (
-              <span className="hidden sm:flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
-                <Check className="w-3 h-3" />
-                Snapshot Ready
-              </span>
-            )}
-          </div>
-
-          <div className="text-[10px] font-mono text-slate-500 hidden md:block">
-            {facingMode === 'environment' ? 'Rear Camera (720p HD)' : 'Front Camera'}
-          </div>
+          {capturedFrame && (
+            <span className="hidden sm:flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
+              <Check className="w-3 h-3" />
+              Snapshot Ready
+            </span>
+          )}
         </div>
-      )}
+
+        <div className="text-[10px] font-mono text-slate-500 hidden md:block">
+          {activeSource === 'remote-phone'
+            ? 'Relayed Mobile Snapshot (Low-rate live preview)'
+            : activeSource === 'local-device'
+            ? 'Local Browser MediaStream'
+            : 'ESP32 Wi-Fi MJPEG Stream'}
+        </div>
+      </div>
     </div>
   );
 };
