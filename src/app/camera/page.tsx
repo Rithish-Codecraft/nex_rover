@@ -54,6 +54,7 @@ const READY_STATE_MAP: Record<number, string> = {
 export default function MobileCameraPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
 
   // 1. Core Camera State
   const [cameraState, setCameraState] = useState<CameraState>('idle');
@@ -217,10 +218,11 @@ export default function MobileCameraPage() {
 
   // Stop camera tracks cleanly
   const stopCamera = useCallback(() => {
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((track) => track.stop());
-      setMediaStream(null);
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
     }
+    setMediaStream(null);
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
@@ -229,7 +231,7 @@ export default function MobileCameraPage() {
     setAutoAnalyzeEnabled(false);
     setRelayStatus('idle');
     releaseWakeLock();
-  }, [mediaStream, releaseWakeLock]);
+  }, [releaseWakeLock]);
 
   // Error handling helper declared before startCamera to respect immutability
   const handleCameraInitError = useCallback(
@@ -265,9 +267,9 @@ export default function MobileCameraPage() {
       setLastError(null);
 
       // Stop all old media tracks before starting or restarting
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((track) => track.stop());
-        setMediaStream(null);
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
       }
       if (videoRef.current) {
         videoRef.current.srcObject = null;
@@ -368,13 +370,14 @@ export default function MobileCameraPage() {
       }
 
       // Mark connected and streaming so video paints immediately
+      mediaStreamRef.current = stream;
       setMediaStream(stream);
       setCameraActive(true);
       setCameraState('streaming');
       requestWakeLock();
       await enumerateCameras();
     },
-    [facingMode, selectedDeviceId, mediaStream, requestWakeLock, enumerateCameras, handleCameraInitError]
+    [facingMode, selectedDeviceId, requestWakeLock, enumerateCameras, handleCameraInitError]
   );
 
   // Switch facing mode
@@ -612,12 +615,15 @@ export default function MobileCameraPage() {
     return () => clearInterval(timer);
   }, [autoAnalyzeEnabled, autoIntervalSec, cameraActive, analyzeFrame]);
 
-  // Cleanup on unmount
+  // Cleanup ONLY on actual component unmount
   useEffect(() => {
     return () => {
-      stopCamera();
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+      }
     };
-  }, [stopCamera]);
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
