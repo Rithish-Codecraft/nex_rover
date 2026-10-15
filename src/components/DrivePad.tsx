@@ -102,22 +102,42 @@ export const DrivePad: React.FC<DrivePadProps> = ({
     return {
       onMouseDown: (e: React.MouseEvent) => {
         e.preventDefault();
-        triggerDrive(cmd);
+        if (holdToDrive) {
+          triggerDrive(cmd);
+        }
       },
       onMouseUp: (e: React.MouseEvent) => {
         e.preventDefault();
-        releaseDrive();
+        if (holdToDrive) {
+          releaseDrive();
+        }
       },
       onMouseLeave: () => {
-        if (activeCommand === cmd) releaseDrive();
+        if (holdToDrive && activeCommand === cmd) {
+          releaseDrive();
+        }
       },
       onTouchStart: (e: React.TouchEvent) => {
         e.preventDefault();
-        triggerDrive(cmd);
+        if (holdToDrive) {
+          triggerDrive(cmd);
+        }
       },
       onTouchEnd: (e: React.TouchEvent) => {
         e.preventDefault();
-        releaseDrive();
+        if (holdToDrive) {
+          releaseDrive();
+        }
+      },
+      onClick: (e: React.MouseEvent) => {
+        e.preventDefault();
+        if (!holdToDrive) {
+          triggerDrive(cmd);
+        } else if (activeCommandRef.current === null) {
+          // Fallback if browser bypassed mousedown/mouseup: send bounded 600ms pulse
+          triggerDrive(cmd);
+          setTimeout(() => releaseDrive(), 600);
+        }
       },
     };
   };
