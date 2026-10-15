@@ -139,7 +139,10 @@ class SerialHardwareController:
     def send_command(self, cmd: str) -> Dict[str, any]:
         with self.lock:
             if not self.ser or not self.ser.is_open:
-                return {"ok": False, "error": "Serial port not connected"}
+                target_port = self.port or DEFAULT_PORT
+                logger.info(f"Serial disconnected; attempting auto-reconnect to {target_port}...")
+                if not self.connect(target_port, self.baudrate):
+                    return {"ok": False, "error": f"Serial port {target_port} not connected"}
 
             try:
                 # Flush old queued acks
@@ -149,7 +152,6 @@ class SerialHardwareController:
                     except queue.Empty:
                         break
 
-                self.ser.reset_input_buffer()
                 self.ser.write(f"{cmd}\n".encode("utf-8"))
                 self.ser.flush()
                 self.last_command = cmd
@@ -177,6 +179,9 @@ class SerialHardwareController:
                 self.last_error = f"Write error: {str(e)}"
                 logger.error(self.last_error)
                 self.disconnect()
+                # Attempt quick reconnect on port drop
+                time.sleep(0.5)
+                self.connect(self.port or DEFAULT_PORT, self.baudrate)
                 return {"ok": False, "error": self.last_error}
 
     def get_status(self) -> Dict[str, any]:
@@ -204,6 +209,9 @@ if DEFAULT_PORT in available_devices:
 def auth(fn):
     @wraps(fn)
     def wrapped(*a, **kw):
+        # Allow requests originating directly from local PC loopback
+        if request.remote_addr in {"127.0.0.1", "::1", "localhost"}:
+            return fn(*a, **kw)
         if not TOKEN or request.headers.get("X-Rover-Token", "") != TOKEN:
             return jsonify(ok=False, error="unauthorized"), 401
         return fn(*a, **kw)

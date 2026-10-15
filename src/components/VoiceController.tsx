@@ -30,11 +30,12 @@ export const VoiceController: React.FC<VoiceControllerProps> = ({
   const [isListening, setIsListening] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [lastTranscript, setLastTranscript] = useState<string | null>(null);
+  const [isSpeechSupported, setIsSpeechSupported] = useState<boolean>(false);
 
   const speechHandlerRef = useRef<SpeechHandler | null>(null);
-  const isSpeechSupported = isSpeechRecognitionSupported();
 
   useEffect(() => {
+    setIsSpeechSupported(isSpeechRecognitionSupported());
     const handler = new SpeechHandler();
     handler.setCallbacks({
       onResult: (transcript) => {
