@@ -221,6 +221,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         cameraStreamUrl: 'http://192.168.4.1:81/stream',
         isSimulated: true,
       }));
+    } else if (preset === 'local') {
+      setFormData((prev) => ({
+        ...prev,
+        pcBackendUrl: 'http://127.0.0.1:5000',
+        roverToken: 'your_secure_rover_secret_token_here',
+        usePcRelay: true,
+        isSimulated: false,
+      }));
     }
   };
 

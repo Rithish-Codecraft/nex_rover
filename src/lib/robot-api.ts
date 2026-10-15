@@ -108,6 +108,31 @@ export class RobotApiClient {
       return { success: true };
     }
 
+    // Path A: Authenticated PC Backend Relay (Direct USB Serial to Arduino UNO)
+    if (this.settings.usePcRelay && this.settings.pcBackendUrl) {
+      try {
+        const endpoint = `${this.settings.pcBackendUrl.replace(/\/+$/, '')}/api/command`;
+        const res = await this.fetchWithTimeout(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Rover-Token': this.settings.roverToken || '',
+          },
+          body: JSON.stringify({ command }),
+        }, this.settings.commandTimeoutMs);
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `HTTP ${res.status}`);
+        }
+        return { success: true };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Drive command failed on PC relay';
+        return { success: false, error: message };
+      }
+    }
+
+    // Path B: Direct ESP32-CAM Wi-Fi AP
     try {
       const endpoint = `${this.settings.robotIp.replace(/\/+$/, '')}/api/drive`;
       const res = await this.fetchWithTimeout(endpoint, {
@@ -149,6 +174,23 @@ export class RobotApiClient {
       return { success: true };
     }
 
+    if (this.settings.usePcRelay && this.settings.pcBackendUrl) {
+      try {
+        const endpoint = `${this.settings.pcBackendUrl.replace(/\/+$/, '')}/api/command`;
+        const res = await this.fetchWithTimeout(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Rover-Token': this.settings.roverToken || '',
+          },
+          body: JSON.stringify({ command }),
+        }, this.settings.commandTimeoutMs);
+        return { success: res.ok };
+      } catch {
+        return { success: false, error: 'Speed command failed on PC relay' };
+      }
+    }
+
     try {
       const endpoint = `${this.settings.robotIp.replace(/\/+$/, '')}/api/drive`;
       const res = await this.fetchWithTimeout(endpoint, {
@@ -183,6 +225,23 @@ export class RobotApiClient {
       return { success: true };
     }
 
+    if (this.settings.usePcRelay && this.settings.pcBackendUrl) {
+      try {
+        const endpoint = `${this.settings.pcBackendUrl.replace(/\/+$/, '')}/api/command`;
+        const res = await this.fetchWithTimeout(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Rover-Token': this.settings.roverToken || '',
+          },
+          body: JSON.stringify({ command: `ARM:${joint}:${clampedAngle}` }),
+        }, this.settings.commandTimeoutMs);
+        return { success: res.ok };
+      } catch {
+        return { success: false, error: 'Arm command failed on PC relay' };
+      }
+    }
+
     try {
       const endpoint = `${this.settings.robotIp.replace(/\/+$/, '')}/api/arm`;
       const res = await this.fetchWithTimeout(endpoint, {
@@ -210,10 +269,26 @@ export class RobotApiClient {
   }
 
   async emergencyStop(): Promise<{ success: boolean }> {
-    // Send immediate Stop command
     if (this.settings.isSimulated) {
       simulationEngine.drive('S');
       return { success: true };
+    }
+
+    if (this.settings.usePcRelay && this.settings.pcBackendUrl) {
+      try {
+        const endpoint = `${this.settings.pcBackendUrl.replace(/\/+$/, '')}/api/command`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Rover-Token': this.settings.roverToken || '',
+          },
+          body: JSON.stringify({ command: 'S' }),
+        });
+        return { success: res.ok };
+      } catch {
+        return { success: false };
+      }
     }
 
     try {
@@ -242,6 +317,38 @@ export class RobotApiClient {
   async fetchTelemetry(): Promise<TelemetryData> {
     if (this.settings.isSimulated) {
       return simulationEngine.getTelemetry();
+    }
+
+    // Path A: Authenticated PC Backend Relay status
+    if (this.settings.usePcRelay && this.settings.pcBackendUrl) {
+      const startTime = performance.now();
+      try {
+        const endpoint = `${this.settings.pcBackendUrl.replace(/\/+$/, '')}/api/serial/status`;
+        const res = await this.fetchWithTimeout(endpoint, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        }, this.settings.commandTimeoutMs);
+
+        if (res.ok) {
+          const data = await res.json();
+          const st = data.status || {};
+          const latency = Math.round(performance.now() - startTime);
+          return {
+            connected: Boolean(st.connected),
+            latencyMs: latency,
+            batteryVoltage: 7.8,
+            obstacleDistanceCm: st.obstacle_distance_cm !== undefined ? st.obstacle_distance_cm : null,
+            currentSpeed: 160,
+            arm: { ...DEFAULT_ARM_ANGLES },
+            lastCommand: st.last_command || null,
+            lastSeen: Date.now(),
+            isSimulated: false,
+            firmwareVersion: 'NEX-UNO-V2 (Serial)',
+          };
+        }
+      } catch {
+        // Fall through to robotIp if PC relay fails
+      }
     }
 
     const startTime = performance.now();

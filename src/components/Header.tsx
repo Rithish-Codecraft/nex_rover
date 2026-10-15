@@ -18,6 +18,7 @@ interface HeaderProps {
   isSimulated: boolean;
   onOpenSettings: () => void;
   onEmergencyStop: () => void;
+  onToggleSimulation?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -25,6 +26,7 @@ export const Header: React.FC<HeaderProps> = ({
   isSimulated,
   onOpenSettings,
   onEmergencyStop,
+  onToggleSimulation,
 }) => {
   const isOnline = telemetry.connected;
 
@@ -54,15 +56,18 @@ export const Header: React.FC<HeaderProps> = ({
               <h1 className="text-base sm:text-lg font-bold tracking-wider text-slate-100 flex items-center gap-1 font-mono">
                 NEX<span className="text-cyan-400">-ROVER</span>
               </h1>
-              {isSimulated ? (
-                <span className="px-1.5 py-0.5 text-[10px] font-mono tracking-wide uppercase font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded">
-                  Simulation
-                </span>
-              ) : (
-                <span className="px-1.5 py-0.5 text-[10px] font-mono tracking-wide uppercase font-semibold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 rounded">
-                  Hardware
-                </span>
-              )}
+              <button
+                type="button"
+                onClick={onToggleSimulation}
+                title={isSimulated ? "Switch to Physical Hardware mode" : "Switch to Simulation mode"}
+                className={`px-2 py-0.5 text-[10px] font-mono tracking-wide uppercase font-bold rounded cursor-pointer transition-all active:scale-95 border ${
+                  isSimulated
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
+                    : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+                }`}
+              >
+                {isSimulated ? 'Simulation' : 'Hardware'}
+              </button>
             </div>
             <p className="text-[11px] text-slate-400 font-mono hidden sm:block">
               4WD Mobile Rover + 4-DOF Robotic Arm

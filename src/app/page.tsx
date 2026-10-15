@@ -33,19 +33,52 @@ export default function RoverDashboardPage() {
   // Control Arbitration Mode: 'manual' | 'approval' | 'autonomous'
   const [controlMode, setControlMode] = useState<RoverControlMode>('approval');
 
-  // Settings State - defaults to Simulation Mode first so judges/users can test immediately!
+  // Settings State - defaults with PC backend relay configured
   const [settings, setSettings] = useState<RobotSettings>({
     robotIp: 'http://192.168.4.1',
     cameraStreamUrl: 'http://192.168.4.1:81/stream',
     pcBackendUrl: 'http://127.0.0.1:5000',
-    roverToken: '',
+    roverToken: 'your_secure_rover_secret_token_here',
     usePcRelay: true,
-    isSimulated: true,
+    isSimulated: false,
     holdToDrive: true,
     pollIntervalMs: 1000,
     speechAudioFeedback: true,
     commandTimeoutMs: 2000,
   });
+
+  // Load persistent settings from localStorage on client mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('nexrover_settings');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        setSettings((prev) => ({
+          ...prev,
+          ...parsed,
+          pcBackendUrl: parsed.pcBackendUrl || 'http://127.0.0.1:5000',
+          roverToken: parsed.roverToken || 'your_secure_rover_secret_token_here',
+        }));
+      }
+    } catch {}
+  }, []);
+
+  const handleSaveSettings = useCallback((newSettings: RobotSettings) => {
+    setSettings(newSettings);
+    try {
+      localStorage.setItem('nexrover_settings', JSON.stringify(newSettings));
+    } catch {}
+  }, []);
+
+  const handleToggleSimulation = useCallback(() => {
+    setSettings((prev) => {
+      const updated = { ...prev, isSimulated: !prev.isSimulated };
+      try {
+        localStorage.setItem('nexrover_settings', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, []);
 
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null);
@@ -393,14 +426,13 @@ export default function RoverDashboardPage() {
         isSimulated={settings.isSimulated}
         onOpenSettings={() => setSettingsModalOpen(true)}
         onEmergencyStop={handleEmergencyStop}
+        onToggleSimulation={handleToggleSimulation}
       />
 
       {/* Prominent Simulation Banner if in Simulation Mode */}
       {settings.isSimulated && (
         <SimulationBanner
-          onToggleHardware={() => {
-            setSettings((prev) => ({ ...prev, isSimulated: false }));
-          }}
+          onToggleHardware={handleToggleSimulation}
         />
       )}
 
@@ -563,7 +595,7 @@ export default function RoverDashboardPage() {
         isOpen={settingsModalOpen}
         onClose={() => setSettingsModalOpen(false)}
         settings={settings}
-        onSaveSettings={(newSettings) => setSettings(newSettings)}
+        onSaveSettings={handleSaveSettings}
         onTestConnection={handleTestConnection}
       />
     </div>
