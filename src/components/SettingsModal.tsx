@@ -94,6 +94,54 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  const handlePingSerial = async () => {
+    try {
+      setSerialStatus('Sending PING to UNO...');
+      const url = `${formData.pcBackendUrl.replace(/\/+$/, '')}/api/command`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Rover-Token': formData.roverToken,
+        },
+        body: JSON.stringify({ command: 'PING' }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        const ack = data.serial_response?.ack || data.serial_response?.status || 'OK';
+        setSerialStatus(`PING Ack Received: ${ack}`);
+      } else {
+        setSerialStatus(`PING Failed: ${data.error || 'Unknown error'}`);
+      }
+    } catch (e: any) {
+      setSerialStatus(`PING Network Error: ${e.message}`);
+    }
+  };
+
+  const handleStopSerial = async () => {
+    try {
+      setSerialStatus('Sending STOP (S) to UNO...');
+      const url = `${formData.pcBackendUrl.replace(/\/+$/, '')}/api/command`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Rover-Token': formData.roverToken,
+        },
+        body: JSON.stringify({ command: 'S' }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        const ack = data.serial_response?.ack || 'OK:STOP';
+        setSerialStatus(`STOP Confirmed: ${ack}`);
+      } else {
+        setSerialStatus(`STOP Failed: ${data.error || 'Unknown error'}`);
+      }
+    } catch (e: any) {
+      setSerialStatus(`STOP Network Error: ${e.message}`);
+    }
+  };
+
   const handleDisconnectSerial = async () => {
     try {
       const url = `${formData.pcBackendUrl.replace(/\/+$/, '')}/api/serial/disconnect`;
@@ -381,18 +429,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 mt-2">
+              <div className="flex flex-wrap items-center gap-2 mt-2">
                 <button
                   type="button"
                   onClick={handleConnectSerial}
-                  className="flex-1 py-1 rounded bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold"
+                  className="flex-1 min-w-[100px] py-1.5 rounded bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold transition-all active:scale-95"
                 >
                   Connect Serial
                 </button>
                 <button
                   type="button"
+                  onClick={handlePingSerial}
+                  className="px-3 py-1.5 rounded bg-cyan-950/60 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-500/40 text-[11px] font-bold transition-all active:scale-95"
+                  title="Send PING to Arduino UNO and verify PONG"
+                >
+                  Send PING
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStopSerial}
+                  className="px-3 py-1.5 rounded bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 border border-rose-500/40 text-[11px] font-bold transition-all active:scale-95"
+                  title="Send Emergency STOP (S) to Arduino UNO"
+                >
+                  Test STOP
+                </button>
+                <button
+                  type="button"
                   onClick={handleDisconnectSerial}
-                  className="flex-1 py-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-700 text-[11px]"
+                  className="px-2.5 py-1.5 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-700 text-[11px] transition-all"
                 >
                   Disconnect
                 </button>

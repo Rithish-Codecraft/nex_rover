@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+import queue
 import re
 import threading
 import time
@@ -117,6 +118,8 @@ class SerialHardwareController:
         self.port = None
         self.connected_at = None
 
+        self.ack_queue = queue.Queue()
+
     def _background_reader(self):
         while self.running and self.ser and self.ser.is_open:
             try:
@@ -127,8 +130,9 @@ class SerialHardwareController:
                             self.obstacle_distance_cm = int(line[5:])
                         except ValueError:
                             pass
-                    elif line.startswith("OK:") or line.startswith("PONG") or line.startswith("ERR:"):
+                    else:
                         self.last_ack = line
+                        self.ack_queue.put(line)
             except Exception:
                 break
 
@@ -138,30 +142,22 @@ class SerialHardwareController:
                 return {"ok": False, "error": "Serial port not connected"}
 
             try:
+                # Flush old queued acks
+                while not self.ack_queue.empty():
+                    try:
+                        self.ack_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
                 self.ser.reset_input_buffer()
                 self.ser.write(f"{cmd}\n".encode("utf-8"))
                 self.ser.flush()
                 self.last_command = cmd
 
-                # Wait for hardware acknowledgement
-                start = time.time()
-                ack_received = None
-                while time.time() - start < 1.2:
-                    if self.ser.in_waiting:
-                        line = self.ser.readline().decode("utf-8", errors="ignore").strip()
-                        if line:
-                            if line.startswith("DIST:"):
-                                try:
-                                    self.obstacle_distance_cm = int(line[5:])
-                                except ValueError:
-                                    pass
-                            else:
-                                ack_received = line
-                                self.last_ack = line
-                                break
-                    time.sleep(0.02)
-
-                if ack_received:
+                # Wait for hardware acknowledgement from the background reader
+                try:
+                    ack_received = self.ack_queue.get(timeout=1.5)
+                    self.last_ack = ack_received
                     return {
                         "ok": True,
                         "acknowledged": True,
@@ -169,8 +165,7 @@ class SerialHardwareController:
                         "port": self.port,
                         "command": cmd
                     }
-                else:
-                    # Serial packet was delivered, but no explicit ack string
+                except queue.Empty:
                     return {
                         "ok": True,
                         "acknowledged": True,
